@@ -11,26 +11,53 @@
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
         <junit.version>5.10.2</junit.version>
+        <javafx.version>17.0.10</javafx.version>
     </properties>
 
+    <!-- !!! НОВЫЙ ВАЖНЫЙ РАЗДЕЛ: РЕПОЗИТОРИЙ ДЛЯ JITSI !!! -->
+    <repositories>
+        <repository>
+            <id>jitsi-maven-repository-releases</id>
+            <url>https://github.com/jitsi/jitsi-maven-repository/raw/master/releases/</url>
+        </repository>
+    </repositories>
+
     <dependencies>
+        <!-- Зависимости JavaFX -->
         <dependency>
             <groupId>org.openjfx</groupId>
             <artifactId>javafx-controls</artifactId>
-            <version>17.0.6</version>
-        </dependency>
-        <dependency>
-            <groupId>org.xerial</groupId>
-            <artifactId>sqlite-jdbc</artifactId>
-            <version>3.50.3.0</version>
+            <version>${javafx.version}</version>
         </dependency>
         <dependency>
             <groupId>org.openjfx</groupId>
-            <artifactId>javafx-fxml</artifactId>
-            <version>17.0.6</version>
+            <artifactId>javafx-swing</artifactId>
+            <version>${javafx.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.openjfx</groupId>
+            <artifactId>javafx-media</artifactId>
+            <version>${javafx.version}</version>
         </dependency>
 
+        <!-- База данных -->
+        <dependency>
+            <groupId>org.xerial</groupId>
+            <artifactId>sqlite-jdbc</artifactId>
+            <version>3.45.3.0</version>
+        </dependency>
+
+        <!-- !!! НОВЫЕ ЗАВИСИМОСТИ ДЛЯ ЗВОНКОВ (JITSI) !!! -->
+        <dependency>
+            <groupId>org.jitsi</groupId>
+            <artifactId>libjitsi</artifactId>
+            <version>1.1-34-g19134a9</version>
+        </dependency>
+
+        <!-- Тесты -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-api</artifactId>
@@ -52,8 +79,10 @@
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.13.0</version>
                 <configuration>
-                    <source>23</source>
-                    <target>23</target>
+                    <compilerArgs>
+                        <!-- Добавляем все необходимые модули -->
+                        --add-modules=jdk.httpserver,jdk.crypto.ec
+                    </compilerArgs>
                 </configuration>
             </plugin>
             <plugin>
@@ -62,20 +91,18 @@
                 <version>0.0.8</version>
                 <executions>
                     <execution>
-                        <!-- Default configuration for running with: mvn clean javafx:run -->
                         <id>default-cli</id>
                         <configuration>
-                            <mainClass>anti.messanger.sxdpandoram/anti.messanger.sxdpandoram.HelloApplication
-                            </mainClass>
+                            <mainClass>anti.messanger.sxdpandoram.ChatClient</mainClass>
                             <launcher>app</launcher>
-                            <jlinkZipName>app</jlinkZipName>
-                            <jlinkImageName>app</jlinkImageName>
-                            <noManPages>true</noManPages>
-                            <stripDebug>true</stripDebug>
-                            <noHeaderFiles>true</noHeaderFiles>
                         </configuration>
                     </execution>
                 </executions>
+                <configuration>
+                    <options>
+                        <option>--add-modules=jdk.httpserver,jdk.crypto.ec</option>
+                    </options>
+                </configuration>
             </plugin>
         </plugins>
     </build>
