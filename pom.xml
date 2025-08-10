@@ -1,4 +1,3 @@
-<?xml version="1.0" encoding="UTF-8"?>
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -17,7 +16,6 @@
         <javafx.version>17.0.10</javafx.version>
     </properties>
 
-    <!-- !!! НОВЫЙ ВАЖНЫЙ РАЗДЕЛ: РЕПОЗИТОРИЙ ДЛЯ JITSI !!! -->
     <repositories>
         <repository>
             <id>jitsi-maven-repository-releases</id>
@@ -42,6 +40,18 @@
             <artifactId>javafx-media</artifactId>
             <version>${javafx.version}</version>
         </dependency>
+        <!-- !!! НОВАЯ ЗАВИСИМОСТЬ ДЛЯ ЗВОНКОВ !!! -->
+        <dependency>
+            <groupId>org.openjfx</groupId>
+            <artifactId>javafx-web</artifactId>
+            <version>${javafx.version}</version>
+        </dependency>
+        <!-- https://mvnrepository.com/artifact/org.openjfx/javafx-fxml -->
+        <dependency>
+            <groupId>org.openjfx</groupId>
+            <artifactId>javafx-fxml</artifactId>
+            <version>21-ea+24</version>
+        </dependency>
 
         <!-- База данных -->
         <dependency>
@@ -49,8 +59,6 @@
             <artifactId>sqlite-jdbc</artifactId>
             <version>3.45.3.0</version>
         </dependency>
-
-        <!-- !!! НОВЫЕ ЗАВИСИМОСТИ ДЛЯ ЗВОНКОВ (JITSI) !!! -->
 
         <!-- Тесты -->
         <dependency>

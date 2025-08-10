@@ -24,11 +24,16 @@ import javafx.scene.paint.Color;
 import javafx.scene.shape.Circle;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
+import javafx.scene.web.WebEngine;
+import javafx.scene.web.WebView;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import javafx.util.Duration;
+import javafx.util.StringConverter;
 
 import javax.imageio.ImageIO;
+import javax.sound.sampled.LineUnavailableException;
+import javax.sound.sampled.Mixer;
 import java.awt.image.BufferedImage;
 import java.io.*;
 import java.net.Socket;
@@ -37,6 +42,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
 public class ChatClient extends Application {
 
@@ -50,10 +56,19 @@ public class ChatClient extends Application {
 
     private final ObservableList<ChatMessage> allMessages = FXCollections.observableArrayList();
     private final FilteredList<ChatMessage> filteredMessages = new FilteredList<>(allMessages);
-    private final ObservableList<String> userList = FXCollections.observableArrayList();
+    private final ObservableList<String> userList = FXCollections.observableArrayList("Общий чат");
     private Label feedbackLabel;
 
+    private ListView<String> userListView;
+    private ComboBox<Mixer.Info> microphoneComboBox;
+
     private final Map<String, File> offeredFiles = new HashMap<>();
+    private final Map<String, Stage> activeCallWindows = new HashMap<>();
+
+    private VoiceChatManager voiceChatManager;
+    private boolean isInVoiceChat = false;
+    private Button voiceCallButton;
+    private Button hangUpButton;
 
     private static final String SERVER_CHAT_ADDRESS = "into-eco.gl.at.ply.gg";
     private static final int SERVER_CHAT_PORT = 59462;
@@ -63,6 +78,7 @@ public class ChatClient extends Application {
     @Override
     public void start(Stage stage) {
         this.primaryStage = stage;
+        this.voiceChatManager = new VoiceChatManager();
         primaryStage.setTitle("Мессенджер");
         primaryStage.setScene(createLoginScene());
         primaryStage.show();
@@ -71,6 +87,9 @@ public class ChatClient extends Application {
 
     @Override
     public void stop() throws Exception {
+        if (isInVoiceChat) {
+            stopVoiceChat();
+        }
         if(out != null) out.close();
         if(in != null) in.close();
         super.stop();
@@ -87,30 +106,19 @@ public class ChatClient extends Application {
         return MediaType.OTHER;
     }
 
-    /**
-     * Улучшенный просмотрщик изображений с индикатором загрузки и умной загрузкой.
-     */
     private void showImagePreview(ChatMessage message) {
         Stage previewStage = new Stage();
         previewStage.setTitle("Просмотр: " + message.getFileName());
-
-        // Запрашиваем у JavaFX уменьшенную версию, если это возможно, что ускоряет загрузку
         Image image = new Image(message.getDownloadUrl(), 1920, 1080, true, true, true);
-
         ImageView imageView = new ImageView(image);
         imageView.setPreserveRatio(true);
-
-        // Индикатор загрузки ("крутилка")
         ProgressIndicator progressIndicator = new ProgressIndicator();
         progressIndicator.progressProperty().bind(image.progressProperty());
-        // Скрываем индикатор, когда загрузка завершена (или если была ошибка)
         progressIndicator.visibleProperty().bind(image.progressProperty().isNotEqualTo(1));
-
         ScrollPane scrollPane = new ScrollPane(imageView);
         scrollPane.setPannable(true);
         scrollPane.setFitToWidth(true);
         scrollPane.setFitToHeight(true);
-
         scrollPane.addEventFilter(ScrollEvent.SCROLL, event -> {
             if (event.isControlDown()) {
                 event.consume();
@@ -119,8 +127,6 @@ public class ChatClient extends Application {
                 imageView.setScaleY(imageView.getScaleY() * zoomFactor);
             }
         });
-
-        // StackPane позволяет наложить индикатор поверх картинки
         StackPane root = new StackPane(scrollPane, progressIndicator);
         root.setStyle("-fx-background-color: #2e2e2e;");
         Scene scene = new Scene(root, 1024, 768);
@@ -128,25 +134,18 @@ public class ChatClient extends Application {
         previewStage.show();
     }
 
-    /**
-     * Улучшенный просмотрщик видео с запасным вариантом "Открыть в плеере".
-     */
     private void showVideoPreview(ChatMessage message) {
         Stage previewStage = new Stage();
         previewStage.setTitle("Просмотр: " + message.getFileName());
-
         try {
             Media media = new Media(message.getDownloadUrl());
             MediaPlayer mediaPlayer = new MediaPlayer(media);
             MediaView mediaView = new MediaView(mediaPlayer);
-
             Button playButton = new Button("▶");
             Slider timeSlider = new Slider();
             Label timeLabel = new Label("00:00 / 00:00");
-            // --- НОВАЯ КНОПКА-ЗАПАСНОЙ ВАРИАНТ ---
             Button openInSystemPlayerButton = new Button("Открыть в плеере");
             openInSystemPlayerButton.setOnAction(e -> getHostServices().showDocument(message.getDownloadUrl()));
-
             playButton.setOnAction(e -> {
                 MediaPlayer.Status status = mediaPlayer.getStatus();
                 if (status == MediaPlayer.Status.UNKNOWN || status == MediaPlayer.Status.HALTED) return;
@@ -158,46 +157,32 @@ public class ChatClient extends Application {
                     playButton.setText("▶");
                 }
             });
-
             mediaPlayer.currentTimeProperty().addListener((obs, oldTime, newTime) -> {
                 if (!timeSlider.isValueChanging()) timeSlider.setValue(newTime.toSeconds());
                 timeLabel.setText(formatDuration(newTime) + " / " + formatDuration(mediaPlayer.getTotalDuration()));
             });
-
             mediaPlayer.setOnReady(() -> {
                 timeSlider.setMax(mediaPlayer.getTotalDuration().toSeconds());
                 timeLabel.setText("00:00 / " + formatDuration(mediaPlayer.getTotalDuration()));
                 mediaPlayer.play();
                 playButton.setText("❚❚");
             });
-
             timeSlider.valueProperty().addListener((obs, oldValue, newValue) -> {
                 if (timeSlider.isPressed()) mediaPlayer.seek(Duration.seconds(newValue.doubleValue()));
             });
-
-            mediaPlayer.setOnError(() -> {
-                Platform.runLater(() -> showAlert(Alert.AlertType.ERROR, "Ошибка воспроизведения",
-                        "Не удалось воспроизвести видео. Скорее всего, формат или кодек не поддерживается.\n" +
-                                "Пожалуйста, используйте кнопку 'Открыть в плеере' или скачайте файл."));
-                playButton.setDisable(true);
-                timeSlider.setDisable(true);
-            });
-
+            mediaPlayer.setOnError(() -> Platform.runLater(() -> showAlert(Alert.AlertType.ERROR, "Ошибка воспроизведения", "Не удалось воспроизвести видео. Пожалуйста, используйте кнопку 'Открыть в плеере' или скачайте файл.")));
             DoubleProperty width = mediaView.fitWidthProperty();
             DoubleProperty height = mediaView.fitHeightProperty();
             width.bind(Bindings.selectDouble(mediaView.sceneProperty(), "width"));
             height.bind(Bindings.selectDouble(mediaView.sceneProperty(), "height").subtract(40));
-
             HBox controlBar = new HBox(10, playButton, timeSlider, timeLabel, openInSystemPlayerButton);
             controlBar.setPadding(new Insets(10));
             controlBar.setAlignment(Pos.CENTER);
             HBox.setHgrow(timeSlider, Priority.ALWAYS);
-
             BorderPane root = new BorderPane();
             root.setCenter(mediaView);
             root.setBottom(controlBar);
             root.setStyle("-fx-background-color: black;");
-
             Scene scene = new Scene(root, 800, 600);
             previewStage.setScene(scene);
             previewStage.setOnCloseRequest(e -> mediaPlayer.stop());
@@ -215,9 +200,6 @@ public class ChatClient extends Application {
         long seconds = totalSeconds % 60;
         return String.format("%02d:%02d", minutes, seconds);
     }
-
-    // ... Все остальные методы (createLoginScene, sendMessage, и т.д.) остаются без изменений ...
-    // Ниже идет полный код без сокращений для вашего удобства.
 
     private Scene createLoginScene() {
         GridPane grid = new GridPane();
@@ -274,9 +256,14 @@ public class ChatClient extends Application {
         searchField.setPromptText("Поиск...");
         FilteredList<String> filteredUsers = new FilteredList<>(userList, p -> true);
         searchField.textProperty().addListener((obs, oldVal, newVal) -> filteredUsers.setPredicate(user -> user.toLowerCase().contains(newVal.toLowerCase())));
-        ListView<String> userListView = new ListView<>(filteredUsers);
+        this.userListView = new ListView<>(filteredUsers);
         VBox.setVgrow(userListView, Priority.ALWAYS);
         userListView.getSelectionModel().selectedItemProperty().addListener((obs, oldSelection, newSelection) -> {
+            if (isInVoiceChat && newSelection != null && !newSelection.equals(activeChat)) {
+                Platform.runLater(() -> userListView.getSelectionModel().select(activeChat));
+                showAlert(Alert.AlertType.WARNING, "Звонок активен", "Завершите текущий голосовой чат, чтобы сменить собеседника.");
+                return;
+            }
             if (newSelection != null) {
                 activeChat = newSelection;
                 if (activeChat.equals("Общий чат")) {
@@ -289,6 +276,7 @@ public class ChatClient extends Application {
                 updateMessageFilter();
             }
         });
+        userListView.getSelectionModel().select("Общий чат");
         Circle avatar = new Circle(20, Color.LIGHTGRAY);
         Label nameLabel = new Label(this.currentUsername);
         nameLabel.setFont(Font.font("System", FontWeight.BOLD, 14));
@@ -305,24 +293,121 @@ public class ChatClient extends Application {
     private BorderPane createCenterPanel(Label chatHeader, TextField inputField) {
         BorderPane centerLayout = new BorderPane();
         chatHeader.setFont(Font.font("System", FontWeight.BOLD, 16));
-        HBox topBar = new HBox(chatHeader);
-        topBar.setAlignment(Pos.CENTER);
+
+        Button videoCallButton = new Button("📞");
+        videoCallButton.setTooltip(new Tooltip("Начать видеозвонок"));
+        videoCallButton.setOnAction(e -> initiateVideoCall());
+
+        voiceCallButton = new Button("🎤");
+        voiceCallButton.setTooltip(new Tooltip("Начать голосовой чат"));
+        voiceCallButton.setOnAction(e -> initiateVoiceChat());
+
+        hangUpButton = new Button("❌");
+        hangUpButton.setTooltip(new Tooltip("Завершить голосовой чат"));
+        hangUpButton.setStyle("-fx-text-fill: red; -fx-font-weight: bold;");
+        hangUpButton.setOnAction(e -> stopVoiceChat());
+        hangUpButton.setVisible(false);
+
+        microphoneComboBox = new ComboBox<>();
+        microphoneComboBox.setItems(FXCollections.observableArrayList(voiceChatManager.listMicrophones()));
+        microphoneComboBox.setConverter(new StringConverter<>() {
+            @Override public String toString(Mixer.Info object) { return object == null ? "Нет микрофонов" : object.getName(); }
+            @Override public Mixer.Info fromString(String string) { return null; }
+        });
+        if (!microphoneComboBox.getItems().isEmpty()) {
+            microphoneComboBox.getSelectionModel().selectFirst();
+        }
+        microphoneComboBox.setTooltip(new Tooltip("Выберите микрофон"));
+
+        var isPrivateChat = this.userListView.getSelectionModel().selectedItemProperty().isNotNull()
+                .and(this.userListView.getSelectionModel().selectedItemProperty().isNotEqualTo("Общий чат"));
+
+        videoCallButton.visibleProperty().bind(isPrivateChat.and(Bindings.createBooleanBinding(() -> !isInVoiceChat, hangUpButton.visibleProperty())));
+        voiceCallButton.visibleProperty().bind(isPrivateChat.and(Bindings.createBooleanBinding(() -> !isInVoiceChat, hangUpButton.visibleProperty())));
+        microphoneComboBox.visibleProperty().bind(isPrivateChat.and(Bindings.createBooleanBinding(() -> !isInVoiceChat, hangUpButton.visibleProperty())));
+
+        videoCallButton.managedProperty().bind(videoCallButton.visibleProperty());
+        voiceCallButton.managedProperty().bind(voiceCallButton.visibleProperty());
+        microphoneComboBox.managedProperty().bind(microphoneComboBox.visibleProperty());
+        hangUpButton.managedProperty().bind(hangUpButton.visibleProperty());
+
+        HBox topBar = new HBox(10, chatHeader, videoCallButton, voiceCallButton, microphoneComboBox, hangUpButton);
+        topBar.setAlignment(Pos.CENTER_LEFT);
         topBar.setPadding(new Insets(10));
         topBar.setStyle("-fx-background-color: #f0f0f0;");
         centerLayout.setTop(topBar);
+
         ListView<ChatMessage> messageListView = new ListView<>(filteredMessages);
         messageListView.setCellFactory(param -> new MessageCell());
         centerLayout.setCenter(messageListView);
+
         inputField.setOnAction(e -> sendMessage(inputField));
         Button sendButton = new Button("▶");
         sendButton.setOnAction(e -> sendMessage(inputField));
         Button fileButton = new Button("📎");
         fileButton.setOnAction(e -> sendFileAction());
+
         HBox.setHgrow(inputField, Priority.ALWAYS);
         HBox bottomBar = new HBox(10, fileButton, inputField, sendButton);
         bottomBar.setPadding(new Insets(10));
         centerLayout.setBottom(bottomBar);
         return centerLayout;
+    }
+
+    private void initiateVideoCall() {
+        if (activeChat == null || "Общий чат".equals(activeChat) || isInVoiceChat) return;
+        if (activeCallWindows.containsKey(activeChat)) {
+            activeCallWindows.get(activeChat).toFront();
+            return;
+        }
+        out.println("CALL_INITIATE§§" + activeChat);
+    }
+
+    private void initiateVoiceChat() {
+        if (activeChat == null || "Общий чат".equals(activeChat) || isInVoiceChat) return;
+        if (microphoneComboBox.getSelectionModel().getSelectedItem() == null) {
+            showAlert(Alert.AlertType.WARNING, "Нет микрофона", "Пожалуйста, выберите микрофон для начала звонка.");
+            return;
+        }
+        out.println("VOICE_INVITE§§" + activeChat);
+        addSystemMessage("Исходящий голосовой вызов для " + activeChat + "...", activeChat);
+    }
+
+    private void stopVoiceChat() {
+        if (!isInVoiceChat) return;
+        out.println("VOICE_END§§" + activeChat);
+        voiceChatManager.stopCapture();
+        voiceChatManager.stopPlayback();
+        updateVoiceChatUI(false);
+    }
+
+    private void updateVoiceChatUI(boolean isActive) {
+        isInVoiceChat = isActive;
+        hangUpButton.setVisible(isActive);
+    }
+
+    private void showCallWindow(String partner, String roomName) {
+        if (activeCallWindows.containsKey(partner)) {
+            activeCallWindows.get(partner).toFront();
+            return;
+        }
+        Stage callStage = new Stage();
+        callStage.setTitle("Видеозвонок с " + partner);
+        WebView webView = new WebView();
+        WebEngine webEngine = webView.getEngine();
+        String url = String.format("https://meet.jit.si/%s#config.prejoinPageEnabled=false&userInfo.displayName='%s'", roomName, currentUsername);
+        webEngine.setJavaScriptEnabled(true);
+        webEngine.load(url);
+        StackPane root = new StackPane(webView);
+        Scene scene = new Scene(root, 1000, 700);
+        callStage.setScene(scene);
+        callStage.setOnCloseRequest(event -> {
+            webEngine.load(null);
+            out.println("CALL_END§§" + partner);
+            activeCallWindows.remove(partner);
+        });
+        activeCallWindows.put(partner, callStage);
+        callStage.show();
     }
 
     private void sendMessage(TextField field) {
@@ -342,16 +427,13 @@ public class ChatClient extends Application {
             showAlert(Alert.AlertType.WARNING, "Ошибка", "Отправка файлов возможна только в личных сообщениях.");
             return;
         }
-
         FileChooser fileChooser = new FileChooser();
         fileChooser.setTitle("Выберите файл для отправки");
         File file = fileChooser.showOpenDialog(primaryStage);
-
         if (file != null) {
             offeredFiles.put(activeChat + "::" + file.getName(), file);
             String previewData = generatePreview(file);
             out.println(String.format("FILE_OFFER§§%s§§%s§§%d§§%s", activeChat, file.getName(), file.length(), previewData));
-
             String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"));
             ChatMessage fileOfferMsg = new ChatMessage(currentUsername, timestamp, true, activeChat, file.getName(), file.length(), previewData);
             allMessages.add(fileOfferMsg);
@@ -390,39 +472,276 @@ public class ChatClient extends Application {
         return "type:file";
     }
 
+    private void handleServerMessage(String msg) {
+        Platform.runLater(() -> {
+            String[] parts = msg.split("§§");
+            String command = parts[0];
+            switch (command) {
+                case "LOGIN_SUCCESS":
+                    primaryStage.setScene(createChatScene());
+                    break;
+                case "LOGIN_FAILED":
+                    feedbackLabel.setText("Ошибка: неверный логин/пароль.");
+                    break;
+                case "REGISTER_SUCCESS":
+                    feedbackLabel.setText("Регистрация успешна! Войдите.");
+                    break;
+                case "REGISTER_FAILED_USER_EXISTS":
+                    feedbackLabel.setText("Ошибка: пользователь существует.");
+                    break;
+                case "PUB_MSG":
+                    if (parts.length == 4) {
+                        allMessages.add(new ChatMessage(parts[3], parts[2], parts[1], parts[2].equals(currentUsername), null));
+                    }
+                    break;
+                case "PRIV_MSG":
+                    if (parts.length == 5) {
+                        boolean isMe = parts[2].equals(currentUsername);
+                        String partner = isMe ? parts[3] : parts[2];
+                        allMessages.add(new ChatMessage(parts[4], parts[2], parts[1], isMe, partner));
+                    }
+                    break;
+                case "SYS_MSG":
+                    if (parts.length >= 2) {
+                        addSystemMessage(parts[1], null);
+                    }
+                    break;
+                case "USERS_LIST":
+                    String selected = userListView.getSelectionModel().getSelectedItem();
+                    userList.clear();
+                    userList.add("Общий чат");
+                    if (parts.length > 1 && !parts[1].isEmpty()) {
+                        for (String user : parts[1].split(",")) {
+                            if (!user.equals(currentUsername)) userList.add(user);
+                        }
+                    }
+                    if (userList.contains(selected)) {
+                        userListView.getSelectionModel().select(selected);
+                    } else {
+                        userListView.getSelectionModel().select("Общий чат");
+                    }
+                    break;
+                case "FILE_INCOMING":
+                    if (parts.length == 5) {
+                        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"));
+                        allMessages.add(new ChatMessage(parts[1], timestamp, false, parts[1], parts[2], Long.parseLong(parts[3]), parts[4]));
+                    }
+                    break;
+                case "FILE_LINK":
+                    if (parts.length == 3) {
+                        String filename = parts[1];
+                        String url = parts[2];
+                        for (int i = 0; i < allMessages.size(); i++) {
+                            ChatMessage m = allMessages.get(i);
+                            if (m.isFileOffer() && m.getFileName().equals(filename) && !m.isSentByMe()) {
+                                ChatMessage updatedMessage = new ChatMessage(m.getSender(), m.getTimestamp(), false, m.getConversationPartner(), m.getFileName(), m.getFileSize(), m.getFilePreviewData(), url);
+                                allMessages.set(i, updatedMessage);
+                                return;
+                            }
+                        }
+                    }
+                    break;
+                case "UPLOAD_START":
+                    if(parts.length == 3) {
+                        String recipientName = parts[1];
+                        String fileName = parts[2];
+                        File fileToUpload = offeredFiles.get(recipientName + "::" + fileName);
+                        if(fileToUpload != null) {
+                            new Thread(() -> uploadFileInChunks(fileToUpload, recipientName)).start();
+                        } else {
+                            addSystemMessage("Внутренняя ошибка: не найден файл для отправки.", recipientName);
+                        }
+                    }
+                    break;
+                case "CALL_INCOMING":
+                    if (parts.length == 3) {
+                        String caller = parts[1];
+                        String roomName = parts[2];
+                        Alert incomingCallAlert = new Alert(Alert.AlertType.CONFIRMATION);
+                        incomingCallAlert.setTitle("Входящий видеозвонок");
+                        incomingCallAlert.setHeaderText("Вам звонит " + caller);
+                        incomingCallAlert.setContentText("Хотите принять вызов?");
+                        ButtonType acceptButton = new ButtonType("Принять");
+                        ButtonType declineButton = new ButtonType("Отклонить", ButtonBar.ButtonData.CANCEL_CLOSE);
+                        incomingCallAlert.getButtonTypes().setAll(acceptButton, declineButton);
+                        Optional<ButtonType> result = incomingCallAlert.showAndWait();
+                        if (result.isPresent() && result.get() == acceptButton) {
+                            out.println("CALL_ACCEPT§§" + caller + "§§" + roomName);
+                            showCallWindow(caller, roomName);
+                        } else {
+                            out.println("CALL_DECLINE§§" + caller);
+                        }
+                    }
+                    break;
+                case "CALL_STARTED":
+                    if (parts.length == 3) {
+                        addSystemMessage("Пользователь " + parts[1] + " принял ваш видеозвонок.", parts[1]);
+                        showCallWindow(parts[1], parts[2]);
+                    }
+                    break;
+                case "CALL_DECLINED":
+                    if (parts.length == 2) {
+                        showAlert(Alert.AlertType.INFORMATION, "Видеозвонок отклонен", "Пользователь " + parts[1] + " отклонил ваш вызов.");
+                    }
+                    break;
+                case "CALL_ENDED":
+                    if (parts.length == 2) {
+                        Stage callWindow = activeCallWindows.remove(parts[1]);
+                        if (callWindow != null) {
+                            callWindow.close();
+                            showAlert(Alert.AlertType.INFORMATION, "Видеозвонок завершен", "Пользователь " + parts[1] + " завершил звонок.");
+                        }
+                    }
+                    break;
+                case "CALL_BUSY":
+                    if (parts.length == 2) {
+                        showAlert(Alert.AlertType.WARNING, "Абонент занят", "Пользователь " + parts[1] + " уже разговаривает.");
+                    }
+                    break;
+                case "VOICE_INCOMING":
+                    if (parts.length == 2 && !isInVoiceChat) {
+                        String caller = parts[1];
+                        Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
+                        alert.setTitle("Входящий голосовой вызов");
+                        alert.setHeaderText("Вам звонит " + caller);
+                        alert.setContentText("Принять голосовой вызов?");
+                        alert.showAndWait().ifPresent(response -> {
+                            if (response == ButtonType.OK) {
+                                out.println("VOICE_ACCEPT§§" + caller);
+                            } else {
+                                out.println("VOICE_DECLINE§§" + caller);
+                            }
+                        });
+                    }
+                    break;
+                case "VOICE_START":
+                    if (parts.length == 2) {
+                        try {
+                            voiceChatManager.startPlayback();
+                            voiceChatManager.startCapture(microphoneComboBox.getSelectionModel().getSelectedItem(), parts[1], out);
+                            updateVoiceChatUI(true);
+                            addSystemMessage("Голосовой чат начат с " + parts[1], parts[1]);
+                        } catch (LineUnavailableException e) {
+                            showAlert(Alert.AlertType.ERROR, "Ошибка аудио", "Не удалось получить доступ к аудиоустройствам: " + e.getMessage());
+                            stopVoiceChat();
+                        }
+                    }
+                    break;
+                case "VOICE_END":
+                    voiceChatManager.stopCapture();
+                    voiceChatManager.stopPlayback();
+                    updateVoiceChatUI(false);
+                    addSystemMessage("Голосовой чат завершен.", activeChat);
+                    break;
+                case "VOICE_DECLINED":
+                    if (parts.length == 2) {
+                        showAlert(Alert.AlertType.INFORMATION, "Вызов отклонен", "Пользователь " + parts[1] + " отклонил голосовой вызов.");
+                    }
+                    break;
+                case "AUDIO_CHUNK":
+                    if (parts.length == 2) {
+                        byte[] audioData = Base64.getDecoder().decode(parts[1]);
+                        voiceChatManager.playAudioChunk(audioData);
+                    }
+                    break;
+            }
+        });
+    }
+
+    private void uploadFileInChunks(File file, String recipientName) {
+        final int CHUNK_SIZE = 8192;
+        Platform.runLater(() -> addSystemMessage("Загрузка файла '" + file.getName() + "' на сервер...", recipientName));
+        try (FileInputStream fis = new FileInputStream(file)) {
+            byte[] buffer = new byte[CHUNK_SIZE];
+            int bytesRead;
+            while ((bytesRead = fis.read(buffer)) > 0) {
+                byte[] actualChunk = (bytesRead < CHUNK_SIZE) ? java.util.Arrays.copyOf(buffer, bytesRead) : buffer;
+                String encodedChunk = Base64.getEncoder().encodeToString(actualChunk);
+                out.println(String.format("FILE_CHUNK§§%s§§%s§§%s", recipientName, file.getName(), encodedChunk));
+            }
+            out.println(String.format("FILE_END§§%s§§%s", recipientName, file.getName()));
+            Platform.runLater(() -> addSystemMessage("Файл '" + file.getName() + "' полностью отправлен.", recipientName));
+        } catch (IOException e) {
+            e.printStackTrace();
+            Platform.runLater(() -> addSystemMessage("Ошибка при чтении файла для загрузки: " + e.getMessage(), recipientName));
+        }
+    }
+
+    private void connectToServer() {
+        try {
+            Socket socket = new Socket(SERVER_CHAT_ADDRESS, SERVER_CHAT_PORT);
+            out = new PrintWriter(socket.getOutputStream(), true);
+            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            startServerListener();
+        } catch (IOException e) {
+            Platform.runLater(() -> {
+                if (feedbackLabel != null) {
+                    feedbackLabel.setText("Ошибка: не удалось подключиться к серверу.");
+                } else {
+                    showAlert(Alert.AlertType.ERROR, "Ошибка подключения", "Не удалось подключиться к серверу.");
+                }
+                e.printStackTrace();
+            });
+        }
+    }
+
+    private void startServerListener() {
+        new Thread(() -> {
+            try {
+                String fromServer;
+                while ((fromServer = in.readLine()) != null) {
+                    handleServerMessage(fromServer);
+                }
+            } catch (IOException e) {
+                Platform.runLater(() -> {
+                    if (primaryStage.getScene() != null && primaryStage.getScene().getRoot().getChildrenUnmodifiable().size() > 1) {
+                        addSystemMessage("!!! ПОТЕРЯНО СОЕДИНЕНИЕ С СЕРВЕРОМ !!!", null);
+                        showAlert(Alert.AlertType.ERROR, "Связь потеряна", "Потеряно соединение с сервером. Пожалуйста, перезапустите приложение.");
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void addSystemMessage(String text, String partner) {
+        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"));
+        allMessages.add(new ChatMessage(text, "Система", timestamp, false, partner));
+    }
+
+    private void showAlert(Alert.AlertType type, String title, String content) {
+        Alert alert = new Alert(type);
+        alert.setTitle(title);
+        alert.setHeaderText(null);
+        alert.setContentText(content);
+        alert.showAndWait();
+    }
+
     private class MessageCell extends ListCell<ChatMessage> {
         private final Map<String, Image> iconCache = new HashMap<>();
-
         public MessageCell() {
             try {
-                iconCache.put("file", new Image(getClass().getResourceAsStream("icons/file_icon.png")));
-                iconCache.put("archive", new Image(getClass().getResourceAsStream("icons/archive_icon.png")));
-                iconCache.put("doc", new Image(getClass().getResourceAsStream("icons/doc_icon.png")));
-                iconCache.put("image", new Image(getClass().getResourceAsStream("icons/image_icon.png")));
-                iconCache.put("video", new Image(getClass().getResourceAsStream("icons/video_icon.png")));
+                // ИЗМЕНЕНИЕ: Используем абсолютный путь от корня classpath (начинается со /)
+                iconCache.put("file", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/file_icon.png")));
+                iconCache.put("archive", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/archive_icon.png")));
+                iconCache.put("doc", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/doc_icon.png")));
+                iconCache.put("image", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/image_icon.png")));
+                iconCache.put("video", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/video_icon.png")));
             } catch (Exception e) {
-                System.err.println("КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить иконки! Убедитесь, что они лежат в папке ресурсов.");
+                System.err.println("КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить иконки! Убедитесь, что они лежат в папке src/main/resources/anti/messanger/sxdpandoram/icons/");
             }
         }
-
         @Override
         protected void updateItem(ChatMessage message, boolean empty) {
             super.updateItem(message, empty);
             if (empty || message == null) {
                 setGraphic(null);
-                return;
-            }
-            if (message.isFileOffer()) {
-                setGraphic(createFileOfferBubble(message));
             } else {
-                setGraphic(createSimpleMessageBubble(message));
+                setGraphic(message.isFileOffer() ? createFileOfferBubble(message) : createSimpleMessageBubble(message));
             }
         }
-
         private Node createSimpleMessageBubble(ChatMessage message) {
             VBox bubble = new VBox(3);
             bubble.setMaxWidth(400);
-            String bubbleStyle = "-fx-background-radius: 15; -fx-padding: 8;";
             if (!message.getSender().equals("Система") && !message.isSentByMe()) {
                 Label senderLabel = new Label(message.getSender());
                 senderLabel.setFont(Font.font("System", FontWeight.BOLD, 13));
@@ -441,6 +760,7 @@ public class ChatClient extends Application {
                 bubble.getChildren().add(timeContainer);
             }
             HBox wrapper = new HBox();
+            String bubbleStyle = "-fx-background-radius: 15; -fx-padding: 8;";
             if (message.isSentByMe()) {
                 bubble.setStyle(bubbleStyle + "-fx-background-color: #dcf8c6;");
                 wrapper.setAlignment(Pos.CENTER_RIGHT);
@@ -457,49 +777,36 @@ public class ChatClient extends Application {
             wrapper.setPadding(new Insets(5, 10, 5, 10));
             return wrapper;
         }
-
         private Node createFileOfferBubble(ChatMessage message) {
             ImageView preview = new ImageView();
             String previewData = message.getFilePreviewData();
-
             if (previewData.startsWith("img:")) {
                 try {
                     byte[] imageBytes = Base64.getDecoder().decode(previewData.substring(4));
                     preview.setImage(new Image(new ByteArrayInputStream(imageBytes)));
-                } catch(Exception e) {
-                    preview.setImage(iconCache.get("image"));
-                }
+                } catch(Exception e) { preview.setImage(iconCache.get("image")); }
             } else {
-                String type = previewData.substring(5);
-                preview.setImage(iconCache.getOrDefault(type, iconCache.get("file")));
+                preview.setImage(iconCache.getOrDefault(previewData.substring(5), iconCache.get("file")));
             }
             preview.setFitHeight(80);
             preview.setFitWidth(80);
             preview.setPreserveRatio(true);
-
             MediaType mediaType = getMediaType(message.getFileName());
             if (message.getDownloadUrl() != null && mediaType != MediaType.OTHER) {
                 preview.setStyle("-fx-cursor: hand;");
                 preview.setOnMouseClicked(e -> {
-                    if (mediaType == MediaType.IMAGE) {
-                        showImagePreview(message);
-                    } else if (mediaType == MediaType.VIDEO) {
-                        showVideoPreview(message);
-                    }
+                    if (mediaType == MediaType.IMAGE) showImagePreview(message);
+                    else if (mediaType == MediaType.VIDEO) showVideoPreview(message);
                 });
             }
-
             Label fileNameLabel = new Label(message.getFileName());
             fileNameLabel.setFont(Font.font("System", FontWeight.BOLD, 14));
             Label fileSizeLabel = new Label(String.format("%.2f KB", message.getFileSize() / 1024.0));
             VBox fileInfoBox = new VBox(5, fileNameLabel, fileSizeLabel);
-
             HBox fileBox = new HBox(10, preview, fileInfoBox);
             fileBox.setAlignment(Pos.CENTER_LEFT);
-
             HBox actionPane = new HBox(10);
             actionPane.setAlignment(Pos.CENTER_LEFT);
-
             if (message.getDownloadUrl() != null) {
                 Hyperlink downloadLink = new Hyperlink("Скачать файл");
                 downloadLink.setOnAction(e -> getHostServices().showDocument(message.getDownloadUrl()));
@@ -511,7 +818,6 @@ public class ChatClient extends Application {
                     Button acceptBtn = new Button("Принять");
                     Button declineBtn = new Button("Отклонить");
                     actionPane.getChildren().addAll(acceptBtn, declineBtn);
-
                     acceptBtn.setOnAction(e -> {
                         out.println("FILE_ACCEPT§§" + message.getSender() + "§§" + message.getFileName());
                         actionPane.getChildren().setAll(new Label("Ожидание загрузки..."));
@@ -522,185 +828,14 @@ public class ChatClient extends Application {
                     });
                 }
             }
-
             VBox bubbleContent = new VBox(10, fileBox, actionPane);
             VBox bubble = new VBox(bubbleContent);
             bubble.setPadding(new Insets(10));
             bubble.setStyle("-fx-background-radius: 15; -fx-border-color: #ccc; -fx-border-width: 1px; -fx-border-radius: 15; -fx-background-color: #f5f5f5;");
-
             HBox wrapper = new HBox(bubble);
             wrapper.setPadding(new Insets(5, 10, 5, 10));
             wrapper.setAlignment(message.isSentByMe() ? Pos.CENTER_RIGHT : Pos.CENTER_LEFT);
-
             return wrapper;
         }
-    }
-
-    private void addSystemMessage(String text, String partner) {
-        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"));
-        allMessages.add(new ChatMessage(text, "Система", timestamp, false, partner));
-    }
-
-    private void showAlert(Alert.AlertType type, String title, String content) {
-        Alert alert = new Alert(type);
-        alert.setTitle(title);
-        alert.setHeaderText(null);
-        alert.setContentText(content);
-        alert.showAndWait();
-    }
-
-    private void handleServerMessage(String msg) {
-        Platform.runLater(() -> {
-            String[] parts = msg.split("§§");
-            String command = parts[0];
-
-            switch (command) {
-                case "LOGIN_SUCCESS":
-                    primaryStage.setScene(createChatScene());
-                    break;
-                case "LOGIN_FAILED":
-                    feedbackLabel.setText("Ошибка: неверный логин/пароль.");
-                    break;
-                case "REGISTER_SUCCESS":
-                    feedbackLabel.setText("Регистрация успешна! Войдите.");
-                    break;
-                case "REGISTER_FAILED_USER_EXISTS":
-                    feedbackLabel.setText("Ошибка: пользователь существует.");
-                    break;
-
-                // --- ИСПРАВЛЕННЫЙ КОД ЗДЕСЬ ---
-                case "PUB_MSG": // Формат от сервера: PUB_MSG§§timestamp§§sender§§content
-                    if (parts.length == 4) {
-                        String timestamp = parts[1];
-                        String sender = parts[2];
-                        String content = parts[3];
-                        boolean isMe = sender.equals(currentUsername);
-                        allMessages.add(new ChatMessage(content, sender, timestamp, isMe, null));
-                    }
-                    break;
-                case "PRIV_MSG": // Формат от сервера: PRIV_MSG§§timestamp§§sender§§recipient§§content
-                    if (parts.length == 5) {
-                        String timestamp = parts[1];
-                        String sender = parts[2];
-                        String recipient = parts[3];
-                        String content = parts[4];
-                        boolean isMe = sender.equals(currentUsername);
-                        String partner = isMe ? recipient : sender;
-                        allMessages.add(new ChatMessage(content, sender, timestamp, isMe, partner));
-                    }
-                    break;
-                // ------------------------------------
-
-                case "SYS_MSG":
-                    if (parts.length >= 2) addSystemMessage(parts[1], null);
-                    break;
-                case "USERS_LIST":
-                    userList.clear();
-                    userList.add("Общий чат");
-                    if (parts.length > 1 && !parts[1].isEmpty()) {
-                        for (String user : parts[1].split(",")) {
-                            if (!user.equals(currentUsername)) userList.add(user);
-                        }
-                    }
-                    break;
-
-                case "FILE_INCOMING":
-                    if (parts.length == 5) {
-                        String sender = parts[1];
-                        String filename = parts[2];
-                        long filesize = Long.parseLong(parts[3]);
-                        String previewData = parts[4];
-                        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"));
-                        allMessages.add(new ChatMessage(sender, timestamp, false, sender, filename, filesize, previewData));
-                    }
-                    break;
-
-                case "FILE_LINK":
-                    if (parts.length == 3) {
-                        String filename = parts[1];
-                        String url = parts[2];
-                        for (int i = 0; i < allMessages.size(); i++) {
-                            ChatMessage m = allMessages.get(i);
-                            if (m.isFileOffer() && m.getFileName().equals(filename) && !m.isSentByMe()) {
-                                ChatMessage updatedMessage = new ChatMessage(m.getSender(), m.getTimestamp(), false, m.getConversationPartner(), m.getFileName(), m.getFileSize(), m.getFilePreviewData(), url);
-                                allMessages.set(i, updatedMessage);
-                                return;
-                            }
-                        }
-                    }
-                    break;
-
-                case "UPLOAD_START":
-                    if(parts.length == 3) {
-                        String recipientName = parts[1];
-                        String fileName = parts[2];
-                        File fileToUpload = offeredFiles.get(recipientName + "::" + fileName);
-
-                        if(fileToUpload != null) {
-                            new Thread(() -> uploadFileInChunks(fileToUpload, recipientName)).start();
-                        } else {
-                            addSystemMessage("Внутренняя ошибка: не найден файл для отправки.", recipientName);
-                        }
-                    }
-                    break;
-            }
-        });
-    }
-
-    private void uploadFileInChunks(File file, String recipientName) {
-        final int CHUNK_SIZE = 8192; // 8 KB
-
-        Platform.runLater(() -> addSystemMessage("Загрузка файла '" + file.getName() + "' на сервер...", recipientName));
-
-        try (FileInputStream fis = new FileInputStream(file)) {
-            byte[] buffer = new byte[CHUNK_SIZE];
-            int bytesRead;
-
-            while ((bytesRead = fis.read(buffer)) > 0) {
-                byte[] actualChunk;
-                if (bytesRead < CHUNK_SIZE) {
-                    actualChunk = new byte[bytesRead];
-                    System.arraycopy(buffer, 0, actualChunk, 0, bytesRead);
-                } else {
-                    actualChunk = buffer;
-                }
-                String encodedChunk = Base64.getEncoder().encodeToString(actualChunk);
-                out.println(String.format("FILE_CHUNK§§%s§§%s§§%s", recipientName, file.getName(), encodedChunk));
-            }
-            out.println(String.format("FILE_END§§%s§§%s", recipientName, file.getName()));
-            Platform.runLater(() -> addSystemMessage("Файл '" + file.getName() + "' полностью отправлен. Ожидание ссылки...", recipientName));
-        } catch (IOException e) {
-            e.printStackTrace();
-            Platform.runLater(() -> addSystemMessage("Ошибка при чтении файла для загрузки: " + e.getMessage(), recipientName));
-        }
-    }
-
-    private void connectToServer() {
-        try {
-            Socket socket = new Socket(SERVER_CHAT_ADDRESS, SERVER_CHAT_PORT);
-            out = new PrintWriter(socket.getOutputStream(), true);
-            in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            startServerListener();
-        } catch (IOException e) {
-            Platform.runLater(() -> {
-                if (feedbackLabel != null) {
-                    feedbackLabel.setText("Ошибка: не удалось подключиться к серверу.");
-                    e.printStackTrace();
-                }
-            });
-        }
-    }
-
-    private void startServerListener() {
-        new Thread(() -> {
-            try {
-                String fromServer;
-                while ((fromServer = in.readLine()) != null) {
-                    handleServerMessage(fromServer);
-                }
-            } catch (IOException e) {
-                Platform.runLater(() -> addSystemMessage("!!! ПОТЕРЯНО СОЕДИНЕНИЕ С СЕРВЕРОМ !!!", null));
-            }
-        }).start();
     }
 }

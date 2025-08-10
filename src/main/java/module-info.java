@@ -6,6 +6,7 @@ module anti.messanger.sxdpandoram {
     requires javafx.swing;
     requires jdk.httpserver;
     requires javafx.media;
+    requires javafx.web;
 
 
     opens anti.messanger.sxdpandoram to javafx.fxml;
