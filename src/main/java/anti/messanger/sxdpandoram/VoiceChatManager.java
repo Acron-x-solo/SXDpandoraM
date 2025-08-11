@@ -88,7 +88,6 @@ public class VoiceChatManager {
     public void stopCapture() {
         isRunning = false;
         if (microphone != null) {
-            // Добавляем проверку, чтобы избежать NullPointerException, если поток завершится раньше
             if (microphone.isOpen()) {
                 microphone.stop();
                 microphone.close();
@@ -99,13 +98,7 @@ public class VoiceChatManager {
     }
 
     public void startPlayback() throws LineUnavailableException {
-        // Если мы принимающий клиент, у нас еще нет формата. Установим его по умолчанию.
-        // Сервер гарантирует, что оба клиента будут использовать один и тот же формат,
-        // но нам нужно знать его для инициализации линии воспроизведения.
-        // Для надежности, мы будем передавать формат от инициатора звонка.
-        // Пока оставим так, но в будущем это можно улучшить.
         if (this.activeFormat == null) {
-            // Попробуем найти поддерживаемый формат для динамиков
             AudioFormat[] preferredFormats = new AudioFormat[]{
                     new AudioFormat(44100.0f, 16, 1, true, false),
                     new AudioFormat(16000.0f, 16, 1, true, false),
