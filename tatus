@@ -1,0 +1,126 @@
+[1mdiff --git a/src/main/java/anti/messanger/sxdpandoram/ChatClient.java b/src/main/java/anti/messanger/sxdpandoram/ChatClient.java[m
+[1mindex a3c735a..948b806 100644[m
+[1m--- a/src/main/java/anti/messanger/sxdpandoram/ChatClient.java[m
+[1m+++ b/src/main/java/anti/messanger/sxdpandoram/ChatClient.java[m
+[36m@@ -60,12 +60,12 @@[m [mpublic class ChatClient extends Application {[m
+     private Label feedbackLabel;[m
+ [m
+     private ListView<String> userListView;[m
+[31m-    private ComboBox<Mixer.Info> microphoneComboBox;[m
+[32m+[m[32m    private ComboBox<String> microphoneComboBox;[m
+ [m
+     private final Map<String, File> offeredFiles = new HashMap<>();[m
+     private final Map<String, Stage> activeCallWindows = new HashMap<>();[m
+ [m
+[31m-    private VoiceChatManager voiceChatManager;[m
+[32m+[m[32m    private VoiceCallManager voiceCallManager;[m
+     private boolean isInVoiceChat = false;[m
+     private Button voiceCallButton;[m
+     private Button hangUpButton;[m
+[36m@@ -78,7 +78,7 @@[m [mpublic class ChatClient extends Application {[m
+     @Override[m
+     public void start(Stage stage) {[m
+         this.primaryStage = stage;[m
+[31m-        this.voiceChatManager = new VoiceChatManager();[m
+[32m+[m[32m        this.voiceCallManager = new VoiceCallManager(out);[m
+         primaryStage.setTitle("Мессенджер");[m
+         primaryStage.setScene(createLoginScene());[m
+         primaryStage.show();[m
+[36m@@ -309,11 +309,10 @@[m [mpublic class ChatClient extends Application {[m
+         hangUpButton.setVisible(false);[m
+ [m
+         microphoneComboBox = new ComboBox<>();[m
+[31m-        microphoneComboBox.setItems(FXCollections.observableArrayList(voiceChatManager.listMicrophones()));[m
+[31m-        microphoneComboBox.setConverter(new StringConverter<>() {[m
+[31m-            @Override public String toString(Mixer.Info object) { return object == null ? "Нет микрофонов" : object.getName(); }[m
+[31m-            @Override public Mixer.Info fromString(String string) { return null; }[m
+[31m-        });[m
+[32m+[m[32m        microphoneComboBox.setItems(FXCollections.observableArrayList(voiceCallManager.getInputDeviceNames()));[m
+[32m+[m[32m        if (!microphoneComboBox.getItems().isEmpty()) {[m
+[32m+[m[32m            microphoneComboBox.getSelectionModel().selectFirst();[m
+[32m+[m[32m        }[m
+         if (!microphoneComboBox.getItems().isEmpty()) {[m
+             microphoneComboBox.getSelectionModel().selectFirst();[m
+         }[m
+[36m@@ -376,8 +375,7 @@[m [mpublic class ChatClient extends Application {[m
+     private void stopVoiceChat() {[m
+         if (!isInVoiceChat) return;[m
+         out.println("VOICE_END§§" + activeChat);[m
+[31m-        voiceChatManager.stopCapture();[m
+[31m-        voiceChatManager.stopPlayback();[m
+[32m+[m[32m        voiceCallManager.stopStreaming();[m
+         updateVoiceChatUI(false);[m
+     }[m
+ [m
+[36m@@ -616,21 +614,14 @@[m [mpublic class ChatClient extends Application {[m
+                     break;[m
+                 case "VOICE_START":[m
+                     if (parts.length == 2) {[m
+[31m-                        try {[m
+[31m-                            voiceChatManager.startPlayback();[m
+[31m-                            voiceChatManager.startCapture(microphoneComboBox.getSelectionModel().getSelectedItem(), parts[1], out);[m
+[31m-                            updateVoiceChatUI(true);[m
+[31m-                            addSystemMessage("Голосовой чат начат с " + parts[1], parts[1]);[m
+[31m-                        } catch (LineUnavailableException e) {[m
+[31m-                            showAlert(Alert.AlertType.ERROR, "Ошибка аудио", "Не удалось получить доступ к аудиоустройствам: " + e.getMessage());[m
+[31m-                            stopVoiceChat();[m
+[31m-                        }[m
+[32m+[m[32m                        voiceCallManager.startStreamingWithPeer(parts[1]);[m
+[32m+[m[32m                        updateVoiceChatUI(true);[m
+[32m+[m[32m                        addSystemMessage("Голосовой чат начат с " + parts[1], parts[1]);[m
+                     }[m
+                     break;[m
+                 case "VOICE_END":[m
+[31m-                    voiceChatManager.stopCapture();[m
+[31m-                    voiceChatManager.stopPlayback();[m
+[31m-                    updateVoiceChatUI(false);[m
+[32m+[m[32m                                    voiceCallManager.stopStreaming();[m
+[32m+[m[32m        updateVoiceChatUI(false);[m
+                     addSystemMessage("Голосовой чат завершен.", activeChat);[m
+                     break;[m
+                 case "VOICE_DECLINED":[m
+[36m@@ -641,7 +632,7 @@[m [mpublic class ChatClient extends Application {[m
+                 case "AUDIO_CHUNK":[m
+                     if (parts.length == 2) {[m
+                         byte[] audioData = Base64.getDecoder().decode(parts[1]);[m
+[31m-                        voiceChatManager.playAudioChunk(audioData);[m
+[32m+[m[32m                        voiceCallManager.handleIncomingVoiceFrame(parts[0], parts[1]);[m
+                     }[m
+                     break;[m
+             }[m
+[36m@@ -713,21 +704,28 @@[m [mpublic class ChatClient extends Application {[m
+         alert.setTitle(title);[m
+         alert.setHeaderText(null);[m
+         alert.setContentText(content);[m
+[31m-        alert.showAndWait();[m
+[32m+[m[32m        alert.show();[m
+     }[m
+ [m
+     private class MessageCell extends ListCell<ChatMessage> {[m
+         private final Map<String, Image> iconCache = new HashMap<>();[m
+         public MessageCell() {[m
+[32m+[m[32m            // Создаем простые текстовые иконки вместо загрузки файлов[m
+             try {[m
+[31m-                // ИЗМЕНЕНИЕ: Используем абсолютный путь от корня classpath (начинается со /)[m
+[32m+[m[32m                // Попробуем загрузить иконки, но если не получится - создадим текстовые[m
+                 iconCache.put("file", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/file_icon.png")));[m
+                 iconCache.put("archive", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/archive_icon.png")));[m
+                 iconCache.put("doc", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/doc_icon.png")));[m
+                 iconCache.put("image", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/image_icon.png")));[m
+                 iconCache.put("video", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/video_icon.png")));[m
+             } catch (Exception e) {[m
+[31m-                System.err.println("КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить иконки! Убедитесь, что они лежат в папке src/main/resources/anti/messanger/sxdpandoram/icons/");[m
+[32m+[m[32m                System.out.println("Иконки не загружены, используются текстовые символы");[m
+[32m+[m[32m                // Создаем пустые изображения для предотвращения ошибок[m
+[32m+[m[32m                iconCache.put("file", null);[m
+[32m+[m[32m                iconCache.put("archive", null);[m
+[32m+[m[32m                iconCache.put("doc", null);[m
+[32m+[m[32m                iconCache.put("image", null);[m
+[32m+[m[32m                iconCache.put("video", null);[m
+             }[m
+         }[m
+         @Override[m
+[36m@@ -780,13 +778,29 @@[m [mpublic class ChatClient extends Application {[m
+         private Node createFileOfferBubble(ChatMessage message) {[m
+             ImageView preview = new ImageView();[m
+             String previe

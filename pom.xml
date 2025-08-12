@@ -84,7 +84,7 @@
                 <configuration>
                     <compilerArgs>
                         <!-- Добавляем все необходимые модули -->
-                        --add-modules=jdk.httpserver,jdk.crypto.ec
+                        --add-modules=jdk.httpserver
                     </compilerArgs>
                 </configuration>
             </plugin>

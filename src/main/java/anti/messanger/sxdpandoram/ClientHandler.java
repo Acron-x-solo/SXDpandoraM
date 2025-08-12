@@ -8,7 +8,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class ClientHandler implements Runnable {
@@ -21,8 +20,7 @@ public class ClientHandler implements Runnable {
     private BufferedReader in;
     private String clientName;
 
-    private String currentCallPartner;
-    private String currentVoiceChatPartner;
+    
 
     private static final DateTimeFormatter dtf = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss");
     private static final Map<String, FileOutputStream> activeFileUploads = new ConcurrentHashMap<>();
@@ -36,11 +34,7 @@ public class ClientHandler implements Runnable {
     }
 
     public String getClientName() { return clientName; }
-    public boolean isInCall() { return currentCallPartner != null || currentVoiceChatPartner != null; }
-    public void setInCallWith(String partnerName) { this.currentCallPartner = partnerName; }
-    public void endCall() { this.currentCallPartner = null; }
-    public void setInVoiceChatWith(String partnerName) { this.currentVoiceChatPartner = partnerName; }
-    public void endVoiceChat() { this.currentVoiceChatPartner = null; }
+    
 
     @Override
     public void run() {
@@ -102,33 +96,75 @@ public class ClientHandler implements Runnable {
                     case "FILE_END":
                         if (parts.length >= 3) handleFileEnd(parts[1], parts[2]);
                         break;
-                    case "CALL_INITIATE":
-                        if (parts.length == 2) handleCallInitiate(parts[1]);
+                    
+                    // ==== Профиль ====
+                    case "GET_PROFILE":
+                        handleGetProfile();
                         break;
-                    case "CALL_ACCEPT":
-                        if (parts.length == 3) handleCallAccept(parts[1], parts[2]);
+                    case "UPDATE_PROFILE":
+                        if (parts.length >= 3) handleUpdateProfile(parts[1], parts[2]);
                         break;
-                    case "CALL_DECLINE":
-                        if (parts.length == 2) handleCallDecline(parts[1]);
+                    case "UPDATE_AVATAR":
+                        if (parts.length == 2) handleUpdateAvatar(parts[1]);
                         break;
-                    case "CALL_END":
-                        if (parts.length == 2) handleCallEnd(parts[1]);
+                    case "UPDATE_AVATAR_CLEAR":
+                        handleUpdateAvatar(null);
                         break;
-                    case "VOICE_INVITE":
-                        if (parts.length == 2) handleVoiceInvite(parts[1]);
+                    // ==== Группы ====
+                    case "CREATE_GROUP":
+                        if (parts.length >= 3) handleCreateGroup(parts[1], parts[2]);
                         break;
-                    case "VOICE_ACCEPT":
-                        if (parts.length == 2) handleVoiceAccept(parts[1]);
+                    case "GET_GROUPS":
+                        handleGetGroups();
                         break;
-                    case "VOICE_DECLINE":
-                        if (parts.length == 2) handleVoiceDecline(parts[1]);
+                    case "ADD_MEMBER":
+                        if (parts.length >= 3) handleAddMember(Long.parseLong(parts[1]), parts[2]);
                         break;
-                    case "VOICE_END":
-                        if (parts.length == 2) handleVoiceEnd(parts[1]);
+                    case "REMOVE_MEMBER":
+                        if (parts.length >= 3) handleRemoveMember(Long.parseLong(parts[1]), parts[2]);
                         break;
-                    case "AUDIO_CHUNK":
-                        if (parts.length == 3) handleAudioChunk(parts[1], parts[2]);
+                    case "GROUP_MSG":
+                        if (parts.length >= 3) handleGroupMessage(Long.parseLong(parts[1]), parts[2]);
                         break;
+                    // ==== Серверы ====
+                    case "CREATE_SERVER":
+                        if (parts.length >= 3) handleCreateServer(parts[1], parts[2]);
+                        break;
+                    case "GET_SERVERS":
+                        handleGetServers();
+                        break;
+                    case "ADD_SERVER_MEMBER":
+                        if (parts.length >= 3) handleAddServerMember(Long.parseLong(parts[1]), parts[2]);
+                        break;
+                    case "SERVER_MSG":
+                        if (parts.length >= 3) handleServerMessage(Long.parseLong(parts[1]), parts[2]);
+                        break;
+                 // ==== Звонки и аудио ====
+                 case "VOICE_INVITE":
+                     if (parts.length >= 2) handleVoiceInvite(parts[1]);
+                     break;
+                 case "VOICE_ACCEPT":
+                     if (parts.length >= 2) handleVoiceAccept(parts[1]);
+                     break;
+                 case "VOICE_DECLINE":
+                     if (parts.length >= 2) handleVoiceDecline(parts[1]);
+                     break;
+                 case "VOICE_END":
+                     if (parts.length >= 2) handleVoiceEnd(parts[1]);
+                     break;
+                 case "VOICE_FRAME":
+                     if (parts.length >= 3) handleVoiceFrame(parts[1], parts[2]);
+                     break;
+                 // ==== Демонстрация экрана ====
+                 case "SCREEN_START":
+                     if (parts.length >= 2) handleScreenStart(parts[1]);
+                     break;
+                 case "SCREEN_STOP":
+                     if (parts.length >= 2) handleScreenStop(parts[1]);
+                     break;
+                 case "SCREEN_FRAME":
+                     if (parts.length >= 3) handleScreenFrame(parts[1], parts[2]);
+                     break;
                 }
             }
         } catch (SocketException e) {
@@ -137,8 +173,7 @@ public class ClientHandler implements Runnable {
             e.printStackTrace();
         } finally {
             if (clientName != null) {
-                if (currentCallPartner != null) handleCallEnd(currentCallPartner);
-                if (currentVoiceChatPartner != null) handleVoiceEnd(currentVoiceChatPartner);
+                
 
                 synchronized (clients) { clients.remove(this); }
                 System.out.println("👋 " + clientName + " покинул чат.");
@@ -156,101 +191,220 @@ public class ClientHandler implements Runnable {
         }
     }
 
-    private void handleVoiceInvite(String recipientName) {
-        ClientHandler recipient = findClientByName(recipientName);
-        if (recipient != null) {
-            if (recipient.isInCall()) {
-                sendMessage("CALL_BUSY§§" + recipientName);
+    private void handleGetProfile() {
+        UserProfile profile = databaseManager.getUserProfile(this.clientName);
+        String avatarBase64 = profile.getAvatarBytes() != null ? Base64.getEncoder().encodeToString(profile.getAvatarBytes()) : "";
+        sendMessage(String.format("PROFILE_DATA§§%s§§%s§§%s", escape(profile.getDisplayName()), escape(profile.getStatus()), avatarBase64));
+    }
+
+    private void handleUpdateProfile(String displayName, String status) {
+        boolean ok = databaseManager.updateUserProfile(this.clientName, unescape(displayName), unescape(status));
+        sendMessage("PROFILE_UPDATED§§" + (ok ? "OK" : "ERROR"));
+        if (ok) {
+            // По желанию можно уведомлять всех о смене профиля
+            // broadcastMessage("PROFILE_CHANGED§§" + this.clientName);
+        }
+    }
+
+    private void handleUpdateAvatar(String avatarBase64OrNull) {
+        byte[] avatarBytes = null;
+        if (avatarBase64OrNull != null && !avatarBase64OrNull.isEmpty()) {
+            try {
+                avatarBytes = Base64.getDecoder().decode(avatarBase64OrNull);
+            } catch (IllegalArgumentException e) {
+                sendMessage("AVATAR_UPDATED§§ERROR");
                 return;
             }
-            System.out.println("🎤 " + clientName + " приглашает в голосовой чат -> " + recipientName);
-            recipient.sendMessage("VOICE_INCOMING§§" + this.clientName);
+        }
+        boolean ok = databaseManager.updateUserAvatar(this.clientName, avatarBytes);
+        sendMessage("AVATAR_UPDATED§§" + (ok ? "OK" : "ERROR"));
+    }
+
+    private void handleCreateGroup(String groupName, String description) {
+        boolean ok = databaseManager.createGroup(groupName, description, this.clientName);
+        if (ok) {
+            sendMessage("GROUP_CREATED§§OK");
+            // Уведомляем всех о создании новой группы
+            broadcastMessage(String.format("SYS_MSG§§Создана новая группа: %s", groupName));
+        } else {
+            sendMessage("GROUP_CREATED§§ERROR");
         }
     }
 
-    private void handleVoiceAccept(String callerName) {
-        ClientHandler caller = findClientByName(callerName);
-        if (caller != null) {
-            if (caller.isInCall()) {
-                sendMessage("CALL_BUSY§§" + callerName);
-                return;
+    private void handleGetGroups() {
+        List<GroupInfo> groups = databaseManager.getUserGroups(this.clientName);
+        StringBuilder response = new StringBuilder("GROUPS_LIST§§");
+        for (GroupInfo group : groups) {
+            response.append(group.getId()).append(":")
+                   .append(escape(group.getName())).append(":")
+                   .append(escape(group.getDescription())).append(":")
+                   .append(group.getCreatedBy()).append(":")
+                   .append(group.getCreatedAt()).append(":")
+                   .append(group.isAdmin() ? "1" : "0").append(",");
+        }
+        if (response.charAt(response.length() - 1) == ',') {
+            response.setLength(response.length() - 1);
+        }
+        sendMessage(response.toString());
+    }
+
+    private void handleAddMember(long groupId, String username) {
+        // Проверяем, является ли текущий пользователь админом группы
+        if (!databaseManager.isGroupAdmin(groupId, this.clientName)) {
+            sendMessage("MEMBER_ADDED§§ERROR§§Недостаточно прав");
+            return;
+        }
+        
+        // Проверяем, существует ли пользователь
+        if (!databaseManager.verifyUser(username, "")) { // Пустой пароль для проверки существования
+            sendMessage("MEMBER_ADDED§§ERROR§§Пользователь не найден");
+            return;
+        }
+        
+        boolean ok = databaseManager.addGroupMember(groupId, username, false);
+        if (ok) {
+            sendMessage("MEMBER_ADDED§§OK§§" + username);
+            // Уведомляем добавленного пользователя
+            ClientHandler newMember = findClientByName(username);
+            if (newMember != null) {
+                GroupInfo groupInfo = databaseManager.getGroupInfo(groupId);
+                newMember.sendMessage(String.format("GROUP_INVITE§§%d§§%s§§%s", groupId, groupInfo.getName(), this.clientName));
             }
-            System.out.println("✅ " + this.clientName + " принял голосовой чат от " + callerName);
-            this.setInVoiceChatWith(callerName);
-            caller.setInVoiceChatWith(this.clientName);
-
-            caller.sendMessage("VOICE_START§§" + this.clientName);
-            this.sendMessage("VOICE_START§§" + callerName);
+        } else {
+            sendMessage("MEMBER_ADDED§§ERROR§§Не удалось добавить участника");
         }
     }
 
-    private void handleVoiceDecline(String callerName) {
-        ClientHandler caller = findClientByName(callerName);
-        if (caller != null) {
-            System.out.println("❌ " + this.clientName + " отклонил голосовой чат от " + callerName);
-            caller.sendMessage("VOICE_DECLINED§§" + this.clientName);
+    private void handleRemoveMember(long groupId, String username) {
+        // Проверяем, является ли текущий пользователь админом группы
+        if (!databaseManager.isGroupAdmin(groupId, this.clientName)) {
+            sendMessage("MEMBER_REMOVED§§ERROR§§Недостаточно прав");
+            return;
         }
-    }
-
-    private void handleVoiceEnd(String partnerName) {
-        ClientHandler partner = findClientByName(partnerName);
-        System.out.println("🎤 " + this.clientName + " завершил голосовой чат с " + (partnerName != null ? partnerName : "???"));
-        this.endVoiceChat();
-
-        if (partner != null) {
-            partner.endVoiceChat();
-            partner.sendMessage("VOICE_END");
+        
+        // Нельзя удалить самого себя
+        if (username.equals(this.clientName)) {
+            sendMessage("MEMBER_REMOVED§§ERROR§§Нельзя удалить самого себя");
+            return;
         }
-    }
-
-    private void handleAudioChunk(String recipientName, String audioData) {
-        ClientHandler recipient = findClientByName(recipientName);
-        if (recipient != null && recipient.currentVoiceChatPartner != null && recipient.currentVoiceChatPartner.equals(this.clientName)) {
-            // ИСПРАВЛЕНИЕ: Формируем чистое сообщение для пересылки
-            recipient.sendMessage("AUDIO_CHUNK§§" + audioData);
-        }
-    }
-
-    private void handleCallInitiate(String recipientName) {
-        ClientHandler recipient = findClientByName(recipientName);
-        if (recipient != null) {
-            if (recipient.isInCall()) {
-                sendMessage("CALL_BUSY§§" + recipientName);
-                return;
+        
+        boolean ok = databaseManager.removeGroupMember(groupId, username);
+        if (ok) {
+            sendMessage("MEMBER_REMOVED§§OK§§" + username);
+            // Уведомляем удаленного пользователя
+            ClientHandler removedMember = findClientByName(username);
+            if (removedMember != null) {
+                GroupInfo groupInfo = databaseManager.getGroupInfo(groupId);
+                removedMember.sendMessage(String.format("GROUP_REMOVED§§%d§§%s", groupId, groupInfo.getName()));
             }
-            String roomName = "pandora-call-" + UUID.randomUUID().toString();
-            System.out.println("📞 " + clientName + " звонит -> " + recipientName + " | Комната: " + roomName);
-            recipient.sendMessage("CALL_INCOMING§§" + this.clientName + "§§" + roomName);
+        } else {
+            sendMessage("MEMBER_REMOVED§§ERROR§§Не удалось удалить участника");
         }
     }
 
-    private void handleCallAccept(String callerName, String roomName) {
-        ClientHandler caller = findClientByName(callerName);
-        if (caller != null) {
-            System.out.println("✅ " + this.clientName + " принял видеозвонок от " + callerName);
-            this.setInCallWith(callerName);
-            caller.setInCallWith(this.clientName);
-            caller.sendMessage("CALL_STARTED§§" + this.clientName + "§§" + roomName);
+    private void handleGroupMessage(long groupId, String message) {
+        // Проверяем, является ли пользователь участником группы
+        if (!databaseManager.isGroupMember(groupId, this.clientName)) {
+            sendMessage("GROUP_MSG_SENT§§ERROR§§Вы не являетесь участником группы");
+            return;
+        }
+
+        // Отправляем сообщение всем участникам группы (включая отправителя для локальной синхронизации)
+        List<String> members = databaseManager.getGroupMembers(groupId);
+        String timestamp = getTimestamp();
+        String formattedMsg = String.format("GROUP_MSG§§%s§§%s§§%d§§%s", timestamp, this.clientName, groupId, message);
+
+        // Сохраняем сообщение в БД
+        databaseManager.saveMessage("GROUP", timestamp, this.clientName, "GROUP_" + groupId, message);
+
+        for (String member : members) {
+            ClientHandler memberHandler = findClientByName(member);
+            if (memberHandler != null) {
+                memberHandler.sendMessage(formattedMsg);
+            }
+        }
+
+        // Убираем отдельное подтверждение, так как отправителю уже пришло сообщение
+    }
+
+    private void handleCreateServer(String serverName, String description) {
+        boolean ok = databaseManager.createServer(serverName, description, this.clientName);
+        if (ok) {
+            sendMessage("SERVER_CREATED§§OK");
+            // Уведомляем всех о создании нового сервера
+            broadcastMessage(String.format("SYS_MSG§§Создан новый сервер: %s", serverName));
+        } else {
+            sendMessage("SERVER_CREATED§§ERROR");
         }
     }
 
-    private void handleCallDecline(String callerName) {
-        ClientHandler caller = findClientByName(callerName);
-        if (caller != null) {
-            System.out.println("❌ " + this.clientName + " отклонил видеозвонок от " + callerName);
-            caller.sendMessage("CALL_DECLINED§§" + this.clientName);
+    private void handleGetServers() {
+        List<ServerInfo> servers = databaseManager.getUserServers(this.clientName);
+        StringBuilder response = new StringBuilder("SERVERS_LIST§§");
+        for (ServerInfo server : servers) {
+            response.append(server.getId()).append(":")
+                   .append(escape(server.getName())).append(":")
+                   .append(escape(server.getDescription())).append(":")
+                   .append(server.getCreatedBy()).append(",");
+        }
+        if (response.charAt(response.length() - 1) == ',') {
+            response.setLength(response.length() - 1);
+        }
+        sendMessage(response.toString());
+    }
+
+    private void handleAddServerMember(long serverId, String username) {
+        // Проверяем, является ли текущий пользователь админом сервера
+        if (!databaseManager.isServerAdmin(serverId, this.clientName)) {
+            sendMessage("SERVER_MEMBER_ADDED§§ERROR§§Недостаточно прав");
+            return;
+        }
+        
+        // Проверяем, существует ли пользователь
+        if (!databaseManager.verifyUser(username, "")) { // Пустой пароль для проверки существования
+            sendMessage("SERVER_MEMBER_ADDED§§ERROR§§Пользователь не найден");
+            return;
+        }
+        
+        boolean ok = databaseManager.addServerMember(serverId, username, false);
+        if (ok) {
+            sendMessage("SERVER_MEMBER_ADDED§§OK§§" + username);
+            // Уведомляем добавленного пользователя
+            ClientHandler newMember = findClientByName(username);
+            if (newMember != null) {
+                ServerInfo serverInfo = databaseManager.getServerInfo(serverId);
+                newMember.sendMessage(String.format("SERVER_INVITE§§%d§§%s§§%s", serverId, serverInfo.getName(), this.clientName));
+            }
+        } else {
+            sendMessage("SERVER_MEMBER_ADDED§§ERROR§§Не удалось добавить участника");
         }
     }
 
-    private void handleCallEnd(String partnerName) {
-        ClientHandler partner = findClientByName(partnerName);
-        System.out.println("📞 " + this.clientName + " завершил видеозвонок с " + (partnerName != null ? partnerName : "???"));
-        this.endCall();
-        if (partner != null) {
-            partner.endCall();
-            partner.sendMessage("CALL_ENDED§§" + this.clientName);
+    private void handleServerMessage(long serverId, String message) {
+        // Проверяем, является ли пользователь участником сервера
+        if (!databaseManager.isServerMember(serverId, this.clientName)) {
+            sendMessage("SERVER_MSG_SENT§§ERROR§§Вы не являетесь участником сервера");
+            return;
+        }
+
+        // Отправляем сообщение всем участникам сервера (включая отправителя для локальной синхронизации)
+        List<String> members = databaseManager.getServerMembers(serverId);
+        String timestamp = getTimestamp();
+        String formattedMsg = String.format("SERVER_MSG§§%s§§%s§§%d§§%s", timestamp, this.clientName, serverId, message);
+
+        // Сохраняем сообщение в БД
+        databaseManager.saveMessage("SERVER", timestamp, this.clientName, "SERVER_" + serverId, message);
+
+        for (String member : members) {
+            ClientHandler memberHandler = findClientByName(member);
+            if (memberHandler != null) {
+                memberHandler.sendMessage(formattedMsg);
+            }
         }
     }
+
+    private String escape(String s) { return s == null ? "" : s.replace("\n", "\\n"); }
+    private String unescape(String s) { return s == null ? "" : s.replace("\\n", "\n"); }
 
     private void handleFileOffer(String recipientName, String filename, long filesize, String previewData) {
         ClientHandler recipient = findClientByName(recipientName);
@@ -359,5 +513,67 @@ public class ClientHandler implements Runnable {
 
     private String getTimestamp() {
         return LocalDateTime.now().format(dtf);
+    }
+
+    // ====== Voice Call helpers ======
+    private void handleVoiceInvite(String callee) {
+        ClientHandler r = findClientByName(callee);
+        if (r != null) {
+            r.sendMessage("VOICE_INVITE§§" + this.clientName);
+        } else {
+            sendMessage("SYS_MSG§§Пользователь недоступен для звонка");
+        }
+    }
+
+    private void handleVoiceAccept(String caller) {
+        ClientHandler c = findClientByName(caller);
+        if (c != null) {
+            // Подтверждаем обоим начало звонка
+            c.sendMessage("VOICE_START§§" + this.clientName);
+            sendMessage("VOICE_START§§" + caller);
+        }
+    }
+
+    private void handleVoiceDecline(String caller) {
+        ClientHandler c = findClientByName(caller);
+        if (c != null) {
+            c.sendMessage("VOICE_DECLINED§§" + this.clientName);
+        }
+    }
+
+    private void handleVoiceEnd(String peer) {
+        ClientHandler p = findClientByName(peer);
+        if (p != null) {
+            p.sendMessage("VOICE_END§§" + this.clientName);
+        }
+    }
+
+    private void handleVoiceFrame(String recipient, String base64Data) {
+        ClientHandler r = findClientByName(recipient);
+        if (r != null) {
+            // Пересылаем кадр получателю с именем отправителя
+            r.sendMessage("AUDIO_CHUNK§§" + this.clientName + "§§" + base64Data);
+        }
+    }
+
+    private void handleScreenStart(String recipient) {
+        ClientHandler r = findClientByName(recipient);
+        if (r != null) {
+            r.sendMessage("SYS_MSG§§" + this.clientName + " начал демонстрацию экрана.");
+        }
+    }
+
+    private void handleScreenStop(String recipient) {
+        ClientHandler r = findClientByName(recipient);
+        if (r != null) {
+            r.sendMessage("SYS_MSG§§" + this.clientName + " остановил демонстрацию экрана.");
+        }
+    }
+
+    private void handleScreenFrame(String recipient, String base64Jpeg) {
+        ClientHandler r = findClientByName(recipient);
+        if (r != null) {
+            r.sendMessage("SCREEN_FRAME§§" + this.clientName + "§§" + base64Jpeg);
+        }
     }
 }
