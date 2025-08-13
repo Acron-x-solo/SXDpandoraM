@@ -13,6 +13,7 @@ import javafx.geometry.Pos;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
+import javafx.scene.control.Hyperlink;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.scene.input.ScrollEvent;
@@ -32,6 +33,10 @@ import javafx.stage.Stage;
 import javafx.stage.StageStyle;
 import javafx.util.Duration;
 import javafx.util.StringConverter;
+import javafx.fxml.FXMLLoader;
+import javafx.scene.Parent;
+import javafx.animation.KeyFrame;
+import javafx.animation.Timeline;
 
 import javax.imageio.ImageIO;
 import javax.sound.sampled.LineUnavailableException;
@@ -48,6 +53,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Arrays;
+import java.awt.Desktop;
 
 public class ChatClient extends Application {
 
@@ -96,13 +103,16 @@ public class ChatClient extends Application {
 
     private ListView<String> userListView;
     private ComboBox<String> microphoneComboBox;
+    private TextField messageTextField;
 
     private final Map<String, File> offeredFiles = new HashMap<>();
     private final Map<String, Stage> activeCallWindows = new HashMap<>();
     
     // Поля для голосовых звонков
     private VoiceCallManager voiceCallManager;
+    private ScreenShareManager screenShareManager;
     private boolean isInVoiceChat = false;
+    private boolean isScreenSharing = false;
     private Button voiceCallButton;
     private Button hangUpButton;
     
@@ -120,43 +130,78 @@ public class ChatClient extends Application {
     private ImageView screenShareView;
     private Stage callStage;
     
+    // Поля для интегрированных панелей
+    private VBox callPanel;
+    private VBox screenSharePanel;
+    private BorderPane integratedCallPanel;
+    private BorderPane integratedScreenSharePanel;
+    private ImageView callPreviewImageView;
+    private ImageView peerPreviewImageView;
+    private String currentCallPeer;
+    
     // Поля для сохранения входа
     private String savedUsername = "";
     private String savedPassword = "";
+    
+    // Добавляем недостающие поля
+    private Socket socket;
+    private Timeline previewTimer;
 
     private static final String SERVER_CHAT_ADDRESS = "into-eco.gl.at.ply.gg";
     private static final int SERVER_CHAT_PORT = 59462;
 
-    public static void main(String[] args) { launch(args); }
+    public static void main(String[] args) {
+        launch(args);
+    }
 
     @Override
-    public void start(Stage stage) {
-        this.primaryStage = stage;
-        primaryStage.setTitle("Мессенджер");
+    public void start(Stage primaryStage) {
+        this.primaryStage = primaryStage;
+        primaryStage.setTitle("SXD Pandora M - Вход");
         
         // Загружаем настройки сессии
         loadSessionSettings();
         
         // Создаем сцену входа
-        primaryStage.setScene(createLoginScene());
+        Scene loginScene = createLoginScene();
+        primaryStage.setScene(loginScene);
         primaryStage.show();
         
         // Подключаемся к серверу
-        new Thread(this::connectToServer).start();
+        connectToServer();
     }
 
     @Override
-    public void stop() throws Exception {
-        if (isInVoiceChat) {
-            stopVoiceChat();
-        }
-        
-        // Сохраняем настройки сессии
+    public void stop() {
+        // Сохраняем настройки при закрытии
         saveSessionSettings();
         
-        if(out != null) out.close();
-        if(in != null) in.close();
-        super.stop();
+        // Закрываем соединение с сервером
+        if (out != null) {
+            out.println("LOGOUT");
+        }
+        
+        // Останавливаем все активные процессы
+        if (voiceCallManager != null) {
+            voiceCallManager.stopStreaming();
+        }
+        
+        if (screenShareManager != null) {
+            screenShareManager.stopSharing();
+        }
+        
+        if (previewTimer != null) {
+            previewTimer.stop();
+        }
+        
+        // Закрываем сокет
+        try {
+            if (socket != null && !socket.isClosed()) {
+                socket.close();
+            }
+        } catch (IOException e) {
+            System.err.println("Ошибка при закрытии сокета: " + e.getMessage());
+        }
     }
 
     private MediaType getMediaType(String fileName) {
@@ -201,60 +246,51 @@ public class ChatClient extends Application {
     private void showVideoPreview(ChatMessage message) {
         Stage previewStage = new Stage();
         previewStage.setTitle("Просмотр: " + message.getFileName());
-        try {
-            Media media = new Media(message.getDownloadUrl());
-            MediaPlayer mediaPlayer = new MediaPlayer(media);
-            MediaView mediaView = new MediaView(mediaPlayer);
-            Button playButton = new Button("▶");
-            Slider timeSlider = new Slider();
-            Label timeLabel = new Label("00:00 / 00:00");
-            Button openInSystemPlayerButton = new Button("Открыть в плеере");
-            openInSystemPlayerButton.setOnAction(e -> getHostServices().showDocument(message.getDownloadUrl()));
-            playButton.setOnAction(e -> {
-                MediaPlayer.Status status = mediaPlayer.getStatus();
-                if (status == MediaPlayer.Status.UNKNOWN || status == MediaPlayer.Status.HALTED) return;
-                if (status == MediaPlayer.Status.PAUSED || status == MediaPlayer.Status.READY || status == MediaPlayer.Status.STOPPED) {
-                    mediaPlayer.play();
-                    playButton.setText("❚❚");
-                } else {
-                    mediaPlayer.pause();
-                    playButton.setText("▶");
-                }
-            });
-            mediaPlayer.currentTimeProperty().addListener((obs, oldTime, newTime) -> {
-                if (!timeSlider.isValueChanging()) timeSlider.setValue(newTime.toSeconds());
-                timeLabel.setText(formatDuration(newTime) + " / " + formatDuration(mediaPlayer.getTotalDuration()));
-            });
-            mediaPlayer.setOnReady(() -> {
-                timeSlider.setMax(mediaPlayer.getTotalDuration().toSeconds());
-                timeLabel.setText("00:00 / " + formatDuration(mediaPlayer.getTotalDuration()));
-                mediaPlayer.play();
-                playButton.setText("❚❚");
-            });
-            timeSlider.valueProperty().addListener((obs, oldValue, newValue) -> {
-                if (timeSlider.isPressed()) mediaPlayer.seek(Duration.seconds(newValue.doubleValue()));
-            });
-            mediaPlayer.setOnError(() -> Platform.runLater(() -> showAlert(Alert.AlertType.ERROR, "Ошибка воспроизведения", "Не удалось воспроизвести видео. Пожалуйста, используйте кнопку 'Открыть в плеере' или скачайте файл.")));
-            DoubleProperty width = mediaView.fitWidthProperty();
-            DoubleProperty height = mediaView.fitHeightProperty();
-            width.bind(Bindings.selectDouble(mediaView.sceneProperty(), "width"));
-            height.bind(Bindings.selectDouble(mediaView.sceneProperty(), "height").subtract(40));
-            HBox controlBar = new HBox(10, playButton, timeSlider, timeLabel, openInSystemPlayerButton);
-            controlBar.setPadding(new Insets(10));
-            controlBar.setAlignment(Pos.CENTER);
-            HBox.setHgrow(timeSlider, Priority.ALWAYS);
-            BorderPane root = new BorderPane();
-            root.setCenter(mediaView);
-            root.setBottom(controlBar);
-            root.setStyle("-fx-background-color: black;");
-            Scene scene = new Scene(root, 800, 600);
+        
+        VBox root = new VBox(20);
+        root.setAlignment(Pos.CENTER);
+        root.setPadding(new Insets(20));
+        root.setStyle("-fx-background-color: #2f3136;");
+        
+        Label titleLabel = new Label("Видео: " + message.getFileName());
+        titleLabel.setFont(Font.font("System", FontWeight.BOLD, 16));
+        titleLabel.setStyle("-fx-text-fill: white;");
+        
+        Label infoLabel = new Label("Для просмотра видео используйте внешний плеер");
+        infoLabel.setStyle("-fx-text-fill: #b9bbbe;");
+        
+        Button openInSystemPlayerButton = new Button("Открыть в системном плеере");
+        openInSystemPlayerButton.setStyle("-fx-background-color: #7289da; -fx-text-fill: white; -fx-font-size: 14; -fx-padding: 10 20; -fx-background-radius: 5;");
+        openInSystemPlayerButton.setOnAction(e -> {
+            try {
+                getHostServices().showDocument(message.getDownloadUrl());
+            } catch (Exception ex) {
+                showAlert(Alert.AlertType.ERROR, "Ошибка", "Не удалось открыть видео в системном плеере");
+            }
+        });
+        
+        Button downloadButton = new Button("Скачать файл");
+        downloadButton.setStyle("-fx-background-color: #43b581; -fx-text-fill: white; -fx-font-size: 14; -fx-padding: 10 20; -fx-background-radius: 5;");
+        downloadButton.setOnAction(e -> {
+            try {
+                getHostServices().showDocument(message.getDownloadUrl());
+            } catch (Exception ex) {
+                showAlert(Alert.AlertType.ERROR, "Ошибка", "Не удалось скачать файл");
+            }
+        });
+        
+        Button closeButton = new Button("Закрыть");
+        closeButton.setStyle("-fx-background-color: #4f545c; -fx-text-fill: white; -fx-font-size: 14; -fx-padding: 10 20; -fx-background-radius: 5;");
+        closeButton.setOnAction(e -> previewStage.close());
+        
+        HBox buttons = new HBox(15, openInSystemPlayerButton, downloadButton, closeButton);
+        buttons.setAlignment(Pos.CENTER);
+        
+        root.getChildren().addAll(titleLabel, infoLabel, buttons);
+        
+        Scene scene = new Scene(root, 400, 200);
             previewStage.setScene(scene);
-            previewStage.setOnCloseRequest(e -> mediaPlayer.stop());
             previewStage.show();
-        } catch (Exception e) {
-            e.printStackTrace();
-            showAlert(Alert.AlertType.ERROR, "Ошибка", "Не удалось запустить плеер. Пожалуйста, скачайте файл вручную.");
-        }
     }
 
     private String formatDuration(Duration duration) {
@@ -266,75 +302,79 @@ public class ChatClient extends Application {
     }
 
     private Scene createLoginScene() {
-        GridPane grid = new GridPane();
-        grid.setAlignment(Pos.CENTER);
-        grid.setHgap(10);
-        grid.setVgap(10);
-        grid.setPadding(new Insets(25, 25, 25, 25));
+        VBox root = new VBox(20);
+        root.setAlignment(Pos.CENTER);
+        root.setPadding(new Insets(50));
+        root.setStyle("-fx-background-color: " + currentTheme.getPrimary() + ";");
         
-        Label title = new Label("Вход или Регистрация");
-        title.setFont(Font.font("System", FontWeight.BOLD, 18));
-        grid.add(title, 0, 0, 2, 1);
+        Label titleLabel = new Label("SXD Pandora M");
+        titleLabel.setFont(Font.font("System", FontWeight.BOLD, 32));
+        titleLabel.setStyle("-fx-text-fill: " + currentTheme.getText() + ";");
         
-        Label userName = new Label("Логин:");
-        grid.add(userName, 0, 1);
-        TextField userTextField = new TextField();
-        userTextField.setText(savedUsername);
-        grid.add(userTextField, 1, 1);
+        TextField usernameField = new TextField();
+        usernameField.setPromptText("Имя пользователя");
+        usernameField.setStyle("-fx-background-color: " + currentTheme.getSecondary() + "; -fx-text-fill: " + currentTheme.getText() + "; -fx-border-color: " + currentTheme.getTertiary() + "; -fx-border-radius: 5; -fx-background-radius: 5; -fx-padding: 10; -fx-font-size: 14;");
+        usernameField.setPrefWidth(300);
         
-        Label pw = new Label("Пароль:");
-        grid.add(pw, 0, 2);
-        PasswordField pwBox = new PasswordField();
-        pwBox.setText(savedPassword);
-        grid.add(pwBox, 1, 2);
+        PasswordField passwordField = new PasswordField();
+        passwordField.setPromptText("Пароль");
+        passwordField.setStyle("-fx-background-color: " + currentTheme.getSecondary() + "; -fx-text-fill: " + currentTheme.getText() + "; -fx-border-color: " + currentTheme.getTertiary() + "; -fx-border-radius: 5; -fx-background-radius: 5; -fx-padding: 10; -fx-font-size: 14;");
+        passwordField.setPrefWidth(300);
         
-        CheckBox rememberMe = new CheckBox("Запомнить вход");
-        rememberMe.setSelected(!savedUsername.isEmpty());
-        grid.add(rememberMe, 1, 3);
+        Button loginButton = new Button("Войти");
+        loginButton.setStyle("-fx-background-color: " + currentTheme.getAccent() + "; -fx-text-fill: " + currentTheme.getText() + "; -fx-font-size: 16; -fx-padding: 12 30; -fx-background-radius: 5; -fx-border-radius: 5;");
+        loginButton.setPrefWidth(300);
         
-        Button loginBtn = new Button("Войти");
-        Button registerBtn = new Button("Регистрация");
-        VBox hbBtn = new VBox(10, loginBtn, registerBtn);
-        grid.add(hbBtn, 1, 4);
+        Button registerButton = new Button("Регистрация");
+        registerButton.setStyle("-fx-background-color: " + currentTheme.getSecondary() + "; -fx-text-fill: " + currentTheme.getText() + "; -fx-font-size: 14; -fx-padding: 10 20; -fx-background-radius: 5; -fx-border-radius: 5;");
+        registerButton.setPrefWidth(300);
         
-        this.feedbackLabel = new Label();
-        grid.add(feedbackLabel, 1, 6);
+        Label feedbackLabel = new Label("");
+        feedbackLabel.setStyle("-fx-text-fill: " + currentTheme.getMuted() + "; -fx-font-size: 12;");
+        this.feedbackLabel = feedbackLabel;
         
-        loginBtn.setOnAction(e -> {
-            String username = userTextField.getText();
-            String password = pwBox.getText();
-            if (out != null && !username.isEmpty() && !password.isEmpty()) {
-                this.currentUsername = username;
-                
-                // Сохраняем данные входа если отмечено
-                if (rememberMe.isSelected()) {
-                    savedUsername = username;
-                    savedPassword = password;
-                    saveSessionSettings();
-                } else {
-                    savedUsername = "";
-                    savedPassword = "";
-                    saveSessionSettings();
-                }
-                
+        loginButton.setOnAction(e -> {
+            String username = usernameField.getText().trim();
+            String password = passwordField.getText();
+            
+            if (username.isEmpty() || password.isEmpty()) {
+                feedbackLabel.setText("Пожалуйста, заполните все поля");
+                return;
+            }
+            
+            if (out != null) {
+                currentUsername = username; // Сохраняем имя пользователя
                 out.println("LOGIN " + username + " " + password);
+                feedbackLabel.setText("Подключение...");
+            } else {
+                feedbackLabel.setText("Ошибка: нет соединения с сервером");
             }
         });
         
-        registerBtn.setOnAction(e -> {
-            String username = userTextField.getText();
-            String password = pwBox.getText();
-            if (out != null && !username.isEmpty() && !password.isEmpty()) {
+        registerButton.setOnAction(e -> {
+            String username = usernameField.getText().trim();
+            String password = passwordField.getText();
+            
+            if (username.isEmpty() || password.isEmpty()) {
+                feedbackLabel.setText("Пожалуйста, заполните все поля");
+                return;
+            }
+            
+            if (out != null) {
                 out.println("REGISTER " + username + " " + password);
+                feedbackLabel.setText("Регистрация...");
+            } else {
+                feedbackLabel.setText("Ошибка: нет соединения с сервером");
             }
         });
         
-        return new Scene(grid, 400, 350);
+        root.getChildren().addAll(titleLabel, usernameField, passwordField, loginButton, registerButton, feedbackLabel);
+        return new Scene(root, 400, 500);
     }
 
     private Scene createChatScene() {
         // Инициализируем VoiceCallManager после подключения к серверу
-        if (voiceCallManager == null) {
+        if (voiceCallManager == null && out != null) {
             voiceCallManager = new VoiceCallManager(out);
         }
         
@@ -345,7 +385,11 @@ public class ChatClient extends Application {
         layout.setCenter(createCenterPanel(chatHeader, inputField));
         
         // Устанавливаем фильтр сообщений для отображения сообщений общего чата
-        updateMessageFilter();
+        Platform.runLater(() -> {
+            updateMessageFilter();
+            // Обновляем видимость кнопок звонков
+            updateCallButtonsVisibility();
+        });
         
         out.println("LIST_USERS");
         return new Scene(layout, 900, 600);
@@ -374,6 +418,9 @@ public class ChatClient extends Application {
                         inputField.setPromptText("Сообщение для " + activeChat);
                 }
                 updateMessageFilter();
+                
+                // Обновляем видимость кнопок звонков
+                Platform.runLater(() -> updateCallButtonsVisibility());
             }
         });
         userListView.getSelectionModel().select("Общий чат");
@@ -391,13 +438,13 @@ public class ChatClient extends Application {
         Label nameLabel = new Label(displayName.isEmpty() ? this.currentUsername : displayName);
         nameLabel.setFont(Font.font("System", FontWeight.BOLD, 14));
         
-        Button settingsButton = new Button("⚙️ Настройки");
+        Button settingsButton = new Button("Настройки");
         settingsButton.setOnAction(e -> showSettingsDialog());
         
-        Button createGroupButton = new Button("📁 Создать группу");
+        Button createGroupButton = new Button("Создать группу");
         createGroupButton.setOnAction(e -> showCreateGroupDialog());
         
-        Button createServerButton = new Button("🏠 Создать сервер");
+        Button createServerButton = new Button("Создать сервер");
         createServerButton.setOnAction(e -> showCreateServerDialog());
         
         VBox profileBox = new VBox(5, avatar, nameLabel, settingsButton, createGroupButton, createServerButton);
@@ -429,25 +476,30 @@ public class ChatClient extends Application {
         hangUpButton.setVisible(false);
 
         microphoneComboBox = new ComboBox<>();
-        if (voiceCallManager != null) {
-            microphoneComboBox.setItems(FXCollections.observableArrayList(voiceCallManager.getInputDeviceNames()));
-            if (!microphoneComboBox.getItems().isEmpty()) {
-                microphoneComboBox.getSelectionModel().selectFirst();
-            }
-        }
         microphoneComboBox.setTooltip(new Tooltip("Выберите микрофон"));
+        
+        // Инициализируем микрофоны после создания VoiceCallManager
+        Platform.runLater(() -> {
+            if (voiceCallManager != null) {
+                microphoneComboBox.setItems(FXCollections.observableArrayList(voiceCallManager.getInputDeviceNames()));
+                if (!microphoneComboBox.getItems().isEmpty()) {
+                    microphoneComboBox.getSelectionModel().selectFirst();
+                }
+            }
+        });
 
-        var isPrivateChat = this.userListView.getSelectionModel().selectedItemProperty().isNotNull()
-                .and(this.userListView.getSelectionModel().selectedItemProperty().isNotEqualTo("Общий чат"));
-
-        videoCallButton.visibleProperty().bind(isPrivateChat.and(Bindings.createBooleanBinding(() -> !isInVoiceChat, hangUpButton.visibleProperty())));
-        voiceCallButton.visibleProperty().bind(isPrivateChat.and(Bindings.createBooleanBinding(() -> !isInVoiceChat, hangUpButton.visibleProperty())));
-        microphoneComboBox.visibleProperty().bind(isPrivateChat.and(Bindings.createBooleanBinding(() -> !isInVoiceChat, hangUpButton.visibleProperty())));
-
-        videoCallButton.managedProperty().bind(videoCallButton.visibleProperty());
-        voiceCallButton.managedProperty().bind(voiceCallButton.visibleProperty());
-        microphoneComboBox.managedProperty().bind(microphoneComboBox.visibleProperty());
-        hangUpButton.managedProperty().bind(hangUpButton.visibleProperty());
+        // Упрощенная логика видимости кнопок
+        videoCallButton.setVisible(false); // Пока отключаем видеозвонки
+        voiceCallButton.setVisible(false); // Будет обновляться в updateCallButtonsVisibility
+        hangUpButton.setVisible(false);
+        microphoneComboBox.setVisible(false);
+        
+        // Обновляем видимость кнопок после инициализации
+        Platform.runLater(() -> {
+            if (voiceCallButton != null && hangUpButton != null && microphoneComboBox != null) {
+                updateCallButtonsVisibility();
+            }
+        });
 
         // Создаем расширенную панель с новыми функциями
         Button themeButton = new Button("🎨 Тема");
@@ -460,7 +512,8 @@ public class ChatClient extends Application {
         saveChatButton.setOnAction(e -> saveChatToFile());
         
         Button screenShareButton = new Button("🖥️ Демонстрация");
-        screenShareButton.setOnAction(e -> createScreenShareWindow());
+        screenShareButton.setTooltip(new Tooltip("Начать/остановить демонстрацию экрана"));
+        screenShareButton.setOnAction(e -> toggleScreenSharing());
         
         HBox topBar = new HBox(10, chatHeader, videoCallButton, voiceCallButton, microphoneComboBox, hangUpButton, 
                                themeButton, addFriendButton, saveChatButton, screenShareButton);
@@ -469,10 +522,30 @@ public class ChatClient extends Application {
         topBar.setStyle("-fx-background-color: #f0f0f0;");
         centerLayout.setTop(topBar);
 
+        // Интегрированные панели будут созданы в createChatScene
+        
+        // Создаем стек для переключения между чатом и панелями
+        StackPane centerStack = new StackPane();
+        
         this.messageListView = new ListView<>(filteredMessages);
         messageListView.setCellFactory(param -> new MessageCell());
         messageListView.setStyle("-fx-background-color: transparent;");
-        centerLayout.setCenter(messageListView);
+        
+        // Создаем интегрированные панели, если они еще не созданы
+        if (integratedCallPanel == null) {
+            createIntegratedCallPanel();
+        }
+        if (integratedScreenSharePanel == null) {
+            createIntegratedScreenSharePanel();
+        }
+        
+        centerStack.getChildren().addAll(messageListView, integratedCallPanel, integratedScreenSharePanel);
+        
+        // Показываем чат по умолчанию
+        integratedCallPanel.setVisible(false);
+        integratedScreenSharePanel.setVisible(false);
+        
+        centerLayout.setCenter(centerStack);
 
         inputField.setOnAction(e -> sendMessage(inputField));
         Button sendButton = new Button("▶");
@@ -487,153 +560,33 @@ public class ChatClient extends Application {
         return centerLayout;
     }
 
-    private void initiateVideoCall() {
-        if (activeChat == null || "Общий чат".equals(activeChat) || isInVoiceChat) return;
-        if (activeCallWindows.containsKey(activeChat)) {
-            activeCallWindows.get(activeChat).toFront();
-            return;
-        }
-        out.println("CALL_INITIATE§§" + activeChat);
-    }
-
-    private void initiateVoiceChat() {
-        if (activeChat == null || "Общий чат".equals(activeChat) || isInVoiceChat) return;
-        
-        if (voiceCallManager == null) {
-            showAlert(Alert.AlertType.WARNING, "Ошибка", "Голосовой менеджер не инициализирован.");
-            return;
-        }
-        
-        if (microphoneComboBox.getSelectionModel().getSelectedItem() == null) {
-            showAlert(Alert.AlertType.WARNING, "Нет микрофона", "Пожалуйста, выберите микрофон для начала звонка.");
-            return;
-        }
-        
-        // Показываем окно звонка
-        showCallWindow(activeChat, "outgoing");
-        out.println("VOICE_INVITE§§" + activeChat);
-        addSystemMessage("Исходящий голосовой вызов для " + activeChat + "...", activeChat);
-    }
-
-    private void stopVoiceChat() {
-        if (!isInVoiceChat) return;
-        out.println("VOICE_END§§" + activeChat);
-        if (voiceCallManager != null) {
-            voiceCallManager.stopStreaming();
-        }
-        updateVoiceChatUI(false);
-        hideCallWindow();
-    }
-
-    private void updateVoiceChatUI(boolean isActive) {
-        isInVoiceChat = isActive;
-        hangUpButton.setVisible(isActive);
-        voiceCallButton.setVisible(!isActive);
+    private void initializeUIElements() {
+        // Этот метод больше не нужен, так как мы не используем FXML
     }
     
-    private void showCallWindow(String partner, String callType) {
-        if (callStage != null) {
-            callStage.toFront();
-            return;
-        }
-        
-        callStage = new Stage();
-        callStage.setTitle("Звонок с " + partner);
-        callStage.initModality(Modality.NONE);
-        callStage.initStyle(StageStyle.UTILITY);
-        
-        VBox callLayout = new VBox(20);
-        callLayout.setAlignment(Pos.CENTER);
-        callLayout.setPadding(new Insets(30));
-        callLayout.setStyle("-fx-background-color: #2f3136; -fx-text-fill: white;");
-        
-        // Аватар и имя
-        Circle avatar = new Circle(50);
-        avatar.setFill(Color.GRAY);
-        avatar.setStroke(Color.WHITE);
-        avatar.setStrokeWidth(3);
-        
-        Label nameLabel = new Label(partner);
-        nameLabel.setFont(Font.font("System", FontWeight.BOLD, 24));
-        nameLabel.setStyle("-fx-text-fill: white;");
-        
-        // Статус звонка
-        Label statusLabel = new Label(callType.equals("outgoing") ? "Звоним..." : "Входящий звонок");
-        statusLabel.setFont(Font.font("System", 16));
-        statusLabel.setStyle("-fx-text-fill: #b9bbbe;");
-        
-        // Кнопки управления
-        HBox controlsBox = new HBox(20);
-        controlsBox.setAlignment(Pos.CENTER);
-        
-        Button muteButton = new Button("🔇");
-        muteButton.setStyle("-fx-background-color: #4f545c; -fx-text-fill: white; -fx-font-size: 18; -fx-min-width: 60; -fx-min-height: 60; -fx-background-radius: 30;");
-        muteButton.setOnAction(e -> {
-            if (voiceCallManager != null) {
-                voiceCallManager.setMuted(!voiceCallManager.isMuted());
-                muteButton.setText(voiceCallManager.isMuted() ? "🔇" : "🎤");
-            }
-        });
-        
-        Button speakerButton = new Button("🔊");
-        speakerButton.setStyle("-fx-background-color: #4f545c; -fx-text-fill: white; -fx-font-size: 18; -fx-min-width: 60; -fx-min-height: 60; -fx-background-radius: 30;");
-        speakerButton.setOnAction(e -> {
-            if (voiceCallManager != null) {
-                voiceCallManager.setSpeakerOn(!voiceCallManager.isSpeakerOn());
-                speakerButton.setText(voiceCallManager.isSpeakerOn() ? "🔊" : "🔇");
-            }
-        });
-        
-        Button hangUpButton = new Button("📞");
-        hangUpButton.setStyle("-fx-background-color: #ed4245; -fx-text-fill: white; -fx-font-size: 18; -fx-min-width: 60; -fx-min-height: 60; -fx-background-radius: 30;");
-        hangUpButton.setOnAction(e -> stopVoiceChat());
-        
-        if (callType.equals("incoming")) {
-            Button acceptButton = new Button("📞");
-            acceptButton.setStyle("-fx-background-color: #43b581; -fx-text-fill: white; -fx-font-size: 18; -fx-min-width: 60; -fx-min-height: 60; -fx-background-radius: 30;");
-            acceptButton.setOnAction(e -> {
-                out.println("VOICE_ACCEPT§§" + partner);
-                statusLabel.setText("Разговор");
-                controlsBox.getChildren().setAll(muteButton, speakerButton, hangUpButton);
-            });
-            
-            Button declineButton = new Button("📞");
-            declineButton.setStyle("-fx-background-color: #ed4245; -fx-text-fill: white; -fx-font-size: 18; -fx-min-width: 60; -fx-min-height: 60; -fx-background-radius: 30;");
-            declineButton.setOnAction(e -> {
-                out.println("VOICE_DECLINE§§" + partner);
-                hideCallWindow();
-            });
-            
-            controlsBox.getChildren().addAll(acceptButton, declineButton);
-        } else {
-            controlsBox.getChildren().addAll(muteButton, speakerButton, hangUpButton);
-        }
-        
-        callLayout.getChildren().addAll(avatar, nameLabel, statusLabel, controlsBox);
-        
-        Scene callScene = new Scene(callLayout, 400, 500);
-        callStage.setScene(callScene);
-        callStage.setOnCloseRequest(e -> stopVoiceChat());
-        callStage.show();
+    private void setupChatEventHandlers() {
+        // Этот метод больше не нужен, так как мы не используем FXML
     }
     
-    private void hideCallWindow() {
-        if (callStage != null) {
-            callStage.close();
-            callStage = null;
+    private void sortMessagesByTime() {
+        if (allMessages != null) {
+            allMessages.sort((m1, m2) -> {
+                if (m1.getTimestamp() == null && m2.getTimestamp() == null) return 0;
+                if (m1.getTimestamp() == null) return -1;
+                if (m2.getTimestamp() == null) return 1;
+                return m1.getTimestamp().compareTo(m2.getTimestamp());
+            });
         }
     }
-
-
 
     private void sendMessage(TextField field) {
         String text = field.getText().trim();
         if (out == null || text.isEmpty()) return;
 
         if ("Общий чат".equals(activeChat)) {
-            out.println("MSG§§" + text);
+            out.println("MSG " + text);
             } else {
-                out.println("PM§§" + activeChat + "§§" + text);
+                out.println("PM " + activeChat + " " + text);
         }
         field.clear();
     }
@@ -649,310 +602,218 @@ public class ChatClient extends Application {
         if (file != null) {
             offeredFiles.put(activeChat + "::" + file.getName(), file);
             String previewData = generatePreview(file);
-            out.println(String.format("FILE_OFFER§§%s§§%s§§%d§§%s", activeChat, file.getName(), file.length(), previewData));
+            out.println(String.format("FILE_OFFER %s %s %d %s", activeChat, file.getName(), file.length(), previewData));
             String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"));
             ChatMessage fileOfferMsg = new ChatMessage(currentUsername, timestamp, true, activeChat, file.getName(), file.length(), previewData);
-            allMessages.add(fileOfferMsg);
+            if (allMessages != null) {
+                allMessages.add(fileOfferMsg);
+            }
         }
+    }
+    
+    private void selectChat(String chatName) {
+        if (isInVoiceChat && !chatName.equals(activeChat)) {
+            Platform.runLater(() -> userListView.getSelectionModel().select(activeChat));
+            showAlert(Alert.AlertType.WARNING, "Звонок активен", "Завершите текущий голосовой чат, чтобы сменить собеседника.");
+            return;
+        }
+        
+        activeChat = chatName;
+        updateMessageFilter();
+        Platform.runLater(() -> updateCallButtonsVisibility());
+    }
+    
+    private void showFileChooser() {
+        FileChooser fileChooser = new FileChooser();
+        fileChooser.setTitle("Выберите файл для отправки");
+        File file = fileChooser.showOpenDialog(primaryStage);
+        if (file != null) {
+            sendFile(file);
+        }
+    }
+    
+    private void sendFile(File file) {
+        if (out != null && file.exists()) {
+            String recipient = activeChat.equals("Общий чат") ? "ALL" : activeChat;
+            out.println("FILE_OFFER " + recipient + " " + file.getName() + " " + file.length());
+            offeredFiles.put(recipient + "::" + file.getName(), file);
+        }
+    }
+    
+    private void initiateVideoChat() {
+        initiateVideoCall();
+    }
+    
+    private void saveCurrentChat() {
+        saveChatToFile();
     }
 
     private void updateMessageFilter() {
-        filteredMessages.setPredicate(message -> {
-            // Системные сообщения всегда отображаются
-            if (message.getSender().equals("Система")) {
-                return true;
-            }
-            
-            if (activeChat.equals("Общий чат")) {
-                return message.getConversationPartner() == null;
-            } else {
-                return activeChat.equals(message.getConversationPartner());
-            }
-        });
+        if (filteredMessages != null) {
+            filteredMessages.setPredicate(message -> {
+                if (activeChat == null) return false;
+                
+                if (activeChat.equals("Общий чат")) {
+                    return message.getConversationPartner() == null;
+                } else {
+                    return activeChat.equals(message.getConversationPartner()) || 
+                           (message.getSender() != null && message.getSender().equals("Система"));
+                }
+            });
+        }
     }
 
     private String generatePreview(File file) {
         String fileName = file.getName().toLowerCase();
-        if (getMediaType(fileName) == MediaType.IMAGE) {
-            try {
-                Image image = new Image(file.toURI().toString(), 150, 0, true, true);
-                BufferedImage bImage = SwingFXUtils.fromFXImage(image, null);
-                ByteArrayOutputStream s = new ByteArrayOutputStream();
-                ImageIO.write(bImage, "png", s);
-                byte[] res = s.toByteArray();
-                s.close();
-                return "img:" + Base64.getEncoder().encodeToString(res);
-            } catch (IOException e) {
-                e.printStackTrace();
-                return "type:image";
-            }
+        if (fileName.endsWith(".jpg") || fileName.endsWith(".jpeg") || fileName.endsWith(".png") || fileName.endsWith(".gif")) {
+            return "IMAGE";
+        } else if (fileName.endsWith(".mp4") || fileName.endsWith(".avi") || fileName.endsWith(".mov")) {
+            return "VIDEO";
+        } else if (fileName.endsWith(".txt") || fileName.endsWith(".doc") || fileName.endsWith(".pdf")) {
+            return "DOCUMENT";
+        } else {
+            return "FILE";
         }
-        if (getMediaType(fileName) == MediaType.VIDEO) return "type:video";
-        if (fileName.endsWith(".zip") || fileName.endsWith(".rar") || fileName.endsWith(".7z")) return "type:archive";
-        if (fileName.endsWith(".txt") || fileName.endsWith(".docx") || fileName.endsWith(".pdf")) return "type:doc";
-        return "type:file";
     }
 
-    private void handleServerMessage(String msg) {
-        Platform.runLater(() -> {
-            String[] parts = msg.split("§§");
-            String command = parts[0];
-            switch (command) {
-                case "LOGIN_SUCCESS":
-                    primaryStage.setScene(createChatScene());
-                    break;
-                case "LOGIN_FAILED":
-                    feedbackLabel.setText("Ошибка: неверный логин/пароль.");
-                    break;
-                case "REGISTER_SUCCESS":
-                    feedbackLabel.setText("Регистрация успешна! Войдите.");
-                    break;
-                case "REGISTER_FAILED_USER_EXISTS":
-                    feedbackLabel.setText("Ошибка: пользователь существует.");
-                    break;
-                case "PUB_MSG":
-                    if (parts.length == 4) {
-                        Platform.runLater(() -> {
-                            allMessages.add(new ChatMessage(parts[3], parts[2], parts[1], parts[2].equals(currentUsername), null));
-                            if (messageListView != null) {
-                                messageListView.scrollTo(allMessages.size() - 1);
-                            }
-                        });
-                    }
-                    break;
-                case "PRIV_MSG":
-                    if (parts.length == 5) {
-                        Platform.runLater(() -> {
-                            boolean isMe = parts[2].equals(currentUsername);
-                            String partner = isMe ? parts[3] : parts[2];
-                            allMessages.add(new ChatMessage(parts[4], parts[2], parts[1], isMe, partner));
-                            if (messageListView != null) {
-                                messageListView.scrollTo(allMessages.size() - 1);
-                            }
-                        });
-                    }
-                    break;
-                case "SYS_MSG":
-                    if (parts.length >= 2) {
-                        addSystemMessage(parts[1], null);
-                    }
-                    break;
-                case "USERS_LIST":
-                    String selected = userListView.getSelectionModel().getSelectedItem();
-                    userList.clear();
-                    userList.add("Общий чат");
-                    if (parts.length > 1 && !parts[1].isEmpty()) {
-                        for (String user : parts[1].split(",")) {
-                            if (!user.equals(currentUsername)) userList.add(user);
-                        }
-                    }
-                    if (userList.contains(selected)) {
-                        userListView.getSelectionModel().select(selected);
-                    } else {
-                        userListView.getSelectionModel().select("Общий чат");
-                    }
-                    break;
-                case "FILE_INCOMING":
-                    if (parts.length == 5) {
-                        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"));
-                        allMessages.add(new ChatMessage(parts[1], timestamp, false, parts[1], parts[2], Long.parseLong(parts[3]), parts[4]));
-                    }
-                    break;
-                case "FILE_LINK":
-                    if (parts.length == 3) {
-                        String filename = parts[1];
-                        String url = parts[2];
-                        for (int i = 0; i < allMessages.size(); i++) {
-                            ChatMessage m = allMessages.get(i);
-                            if (m.isFileOffer() && m.getFileName().equals(filename) && !m.isSentByMe()) {
-                                ChatMessage updatedMessage = new ChatMessage(m.getSender(), m.getTimestamp(), false, m.getConversationPartner(), m.getFileName(), m.getFileSize(), m.getFilePreviewData(), url);
-                                allMessages.set(i, updatedMessage);
-                                return;
+    private void handleServerMessage(String message) {
+        // Пытаемся разобрать сообщение с пробелом, если не получилось - пробуем §§
+        String[] parts;
+        if (message.contains(" ")) {
+            parts = message.split(" ", 4);
+        } else {
+            parts = message.split("§§");
+        }
+        
+        if (parts.length < 1) return;
+        
+        String command = parts[0];
+        
+        switch (command) {
+            case "SYS_MSG":
+                if (parts.length >= 2) {
+                    String sysMessage = parts[1];
+                    Platform.runLater(() -> {
+                        addSystemMessage(sysMessage, null);
+                    });
+                }
+                break;
+                
+            case "USERS_LIST":
+                if (parts.length >= 2) {
+                    String[] users = parts[1].split(",");
+                    Platform.runLater(() -> {
+                        if (userList != null) {
+                            userList.clear();
+                            userList.add("Общий чат");
+                            // Фильтруем текущего пользователя из списка
+                            for (String user : users) {
+                                if (!user.equals(currentUsername)) {
+                                    userList.add(user);
+                                }
                             }
                         }
-                    }
-                    break;
-                case "UPLOAD_START":
-                    if(parts.length == 3) {
-                        String recipientName = parts[1];
-                        String fileName = parts[2];
-                        File fileToUpload = offeredFiles.get(recipientName + "::" + fileName);
-                        if(fileToUpload != null) {
-                            new Thread(() -> uploadFileInChunks(fileToUpload, recipientName)).start();
-                        } else {
-                            addSystemMessage("Внутренняя ошибка: не найден файл для отправки.", recipientName);
-                        }
-                    }
-                    break;
-                case "VOICE_INVITE":
-                    if (parts.length == 2) {
-                        String caller = parts[1];
-                        showCallWindow(caller, "incoming");
-                    }
-                    break;
-                case "CALL_INCOMING":
-                    if (parts.length == 3) {
-                        String caller = parts[1];
-                        String roomName = parts[2];
-                        Alert incomingCallAlert = new Alert(Alert.AlertType.CONFIRMATION);
-                        incomingCallAlert.setTitle("Входящий видеозвонок");
-                        incomingCallAlert.setHeaderText("Вам звонит " + caller);
-                        incomingCallAlert.setContentText("Хотите принять вызов?");
-                        ButtonType acceptButton = new ButtonType("Принять");
-                        ButtonType declineButton = new ButtonType("Отклонить", ButtonBar.ButtonData.CANCEL_CLOSE);
-                        incomingCallAlert.getButtonTypes().setAll(acceptButton, declineButton);
-                        Optional<ButtonType> result = incomingCallAlert.showAndWait();
-                        if (result.isPresent() && result.get() == acceptButton) {
-                            out.println("CALL_ACCEPT§§" + caller + "§§" + roomName);
-                            showCallWindow(caller, roomName);
-                        } else {
-                            out.println("CALL_DECLINE§§" + caller);
-                        }
-                    }
-                    break;
-                case "CALL_STARTED":
-                    if (parts.length == 3) {
-                        addSystemMessage("Пользователь " + parts[1] + " принял ваш видеозвонок.", parts[1]);
-                        showCallWindow(parts[1], parts[2]);
-                    }
-                    break;
-                case "CALL_DECLINED":
-                    if (parts.length == 2) {
-                        showAlert(Alert.AlertType.INFORMATION, "Видеозвонок отклонен", "Пользователь " + parts[1] + " отклонил ваш вызов.");
-                    }
-                    break;
-                case "CALL_ENDED":
-                    if (parts.length == 2) {
-                        Stage callWindow = activeCallWindows.remove(parts[1]);
-                        if (callWindow != null) {
-                            callWindow.close();
-                            showAlert(Alert.AlertType.INFORMATION, "Видеозвонок завершен", "Пользователь " + parts[1] + " завершил звонок.");
-                        }
-                    }
-                    break;
-                case "CALL_BUSY":
-                    if (parts.length == 2) {
-                        showAlert(Alert.AlertType.WARNING, "Абонент занят", "Пользователь " + parts[1] + " уже разговаривает.");
-                    }
-                    break;
-                case "VOICE_INCOMING":
-                    if (parts.length == 2 && !isInVoiceChat) {
-                        String caller = parts[1];
-                        Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
-                        alert.setTitle("Входящий голосовой вызов");
-                        alert.setHeaderText("Вам звонит " + caller);
-                        alert.setContentText("Принять голосовой вызов?");
-                        alert.showAndWait().ifPresent(response -> {
-                            if (response == ButtonType.OK) {
-                                out.println("VOICE_ACCEPT§§" + caller);
-                            } else {
-                                out.println("VOICE_DECLINE§§" + caller);
+                    });
+                }
+                break;
+                
+            case "PROFILE_DATA":
+                if (parts.length >= 4) {
+                    String username = parts[1];
+                    String email = parts[2];
+                    String avatarBase64 = parts[3];
+                    
+                    Platform.runLater(() -> {
+                        if (username.equals(currentUsername)) {
+                            profileEmail = email;
+                            if (!avatarBase64.isEmpty()) {
+                                try {
+                                    byte[] avatarBytes = Base64.getDecoder().decode(avatarBase64);
+                                    // Сохраняем аватар во временный файл
+                                    File avatarFile = new File("temp_avatar.png");
+                                    try (FileOutputStream fos = new FileOutputStream(avatarFile)) {
+                                        fos.write(avatarBytes);
+                                    }
+                                    avatarPath = avatarFile.getAbsolutePath();
+                                } catch (Exception e) {
+                                    System.err.println("Ошибка загрузки аватара: " + e.getMessage());
+                                }
                             }
-                        });
-                    }
-                    break;
-                case "VOICE_START":
-                    if (parts.length == 2 && voiceCallManager != null) {
-                        voiceCallManager.startStreamingWithPeer(parts[1]);
-                        updateVoiceChatUI(true);
-                        addSystemMessage("Голосовой чат начат с " + parts[1], parts[1]);
-                        // Обновляем статус в окне звонка
-                        if (callStage != null) {
-                            Platform.runLater(() -> {
-                                VBox root = (VBox) callStage.getScene().getRoot();
-                                Label statusLabel = (Label) root.getChildren().get(2);
-                                statusLabel.setText("Разговор");
-                            });
                         }
-                    }
-                    break;
-                case "VOICE_END":
-                    if (parts.length == 2) {
-                        if (voiceCallManager != null) {
-                            voiceCallManager.stopStreaming();
-                        }
-                        updateVoiceChatUI(false);
-                        hideCallWindow();
-                        addSystemMessage("Голосовой чат завершен.", activeChat);
-                    }
-                    break;
-                case "VOICE_DECLINED":
-                    if (parts.length == 2) {
-                        showAlert(Alert.AlertType.INFORMATION, "Вызов отклонен", "Пользователь " + parts[1] + " отклонил голосовой вызов.");
-                    }
-                    break;
-                case "AUDIO_CHUNK":
-                    if (parts.length == 2 && voiceCallManager != null) {
-                        voiceCallManager.handleIncomingVoiceFrame(parts[0], parts[1]);
-                    }
-                    break;
-                case "SCREEN_FRAME":
-                    if (parts.length == 2 && screenShareView != null) {
-                        try {
-                            byte[] imageData = Base64.getDecoder().decode(parts[1]);
-                            Image image = new Image(new ByteArrayInputStream(imageData));
-                            screenShareView.setImage(image);
-                        } catch (Exception e) {
-                            System.out.println("Ошибка при получении кадра экрана: " + e.getMessage());
-                        }
-                    }
-                    break;
-                case "SCREEN_STOP":
-                    if (screenShareStage != null) {
-                        screenShareStage.hide();
-                    }
-                    break;
-                case "GROUP_MSG_SENT":
-                    if (parts.length == 4) {
-                        allMessages.add(new ChatMessage(parts[3], parts[2], parts[1], parts[2].equals(currentUsername), null));
-                    }
-                    break;
-                case "SERVER_MSG_SENT":
-                    if (parts.length == 4) {
-                        allMessages.add(new ChatMessage(parts[3], parts[2], parts[1], parts[2].equals(currentUsername), null));
-                    }
-                    break;
-                case "FRIEND_REQUEST_SENT":
-                    if (parts.length == 2) {
-                        showAlert(Alert.AlertType.INFORMATION, "Запрос отправлен", 
-                                 "Запрос на добавление в друзья отправлен пользователю " + parts[1]);
-                    }
-                    break;
-                case "FRIEND_REQUEST_RECEIVED":
-                    if (parts.length == 2) {
-                        String requester = parts[1];
-                        Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
-                        alert.setTitle("Запрос в друзья");
-                        alert.setHeaderText("Пользователь " + requester + " хочет добавить вас в друзья");
-                        alert.setContentText("Принять запрос?");
-                        alert.showAndWait().ifPresent(response -> {
-                            if (response == ButtonType.OK) {
-                                out.println("FRIEND_ACCEPT§§" + requester);
-                                userList.add(requester);
-                            } else {
-                                out.println("FRIEND_DECLINE§§" + requester);
+                    });
+                }
+                break;
+                
+            default:
+                // Если команда не распознана, пробуем разобрать как старый формат
+                if (message.contains("§§")) {
+                    parts = message.split("§§");
+                    command = parts[0];
+                    
+                    switch (command) {
+                        case "SYS_MSG":
+                            if (parts.length >= 2) {
+                                String sysMessage = parts[1];
+                                Platform.runLater(() -> {
+                                    addSystemMessage(sysMessage, null);
+                                });
                             }
-                        });
+                            break;
+                        
+                        case "USERS_LIST":
+                            if (parts.length >= 2) {
+                                String[] users = parts[1].split(",");
+                                Platform.runLater(() -> {
+                                    if (userList != null) {
+                                        userList.clear();
+                                        userList.add("Общий чат");
+                                        // Фильтруем текущего пользователя из списка
+                                        for (String user : users) {
+                                            if (!user.equals(currentUsername)) {
+                                                userList.add(user);
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                            break;
+                        
+                        case "PROFILE_DATA":
+                            if (parts.length >= 4) {
+                                String username = parts[1];
+                                String email = parts[2];
+                                String avatarBase64 = parts[3];
+                                
+                                Platform.runLater(() -> {
+                                    if (username.equals(currentUsername)) {
+                                        profileEmail = email;
+                                        if (!avatarBase64.isEmpty()) {
+                                            try {
+                                                byte[] avatarBytes = Base64.getDecoder().decode(avatarBase64);
+                                                // Сохраняем аватар во временный файл
+                                                File avatarFile = new File("temp_avatar.png");
+                                                try (FileOutputStream fos = new FileOutputStream(avatarFile)) {
+                                                    fos.write(avatarBytes);
+                                                }
+                                                avatarPath = avatarFile.getAbsolutePath();
+                                            } catch (Exception e) {
+                                                System.err.println("Ошибка загрузки аватара: " + e.getMessage());
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                            break;
+                        
+                        default:
+                            System.out.println("Неизвестная команда: " + message);
+                            break;
                     }
-                    break;
-                case "FRIEND_ACCEPTED":
-                    if (parts.length == 2) {
-                        String friend = parts[1];
-                        if (!userList.contains(friend)) {
-                            userList.add(friend);
-                        }
-                        showAlert(Alert.AlertType.INFORMATION, "Друг добавлен", 
-                                 "Пользователь " + friend + " принял ваш запрос в друзья!");
-                    }
-                    break;
-                case "FRIEND_DECLINED":
-                    if (parts.length == 2) {
-                        showAlert(Alert.AlertType.INFORMATION, "Запрос отклонен", 
-                                 "Пользователь " + parts[1] + " отклонил ваш запрос в друзья.");
-                    }
-                    break;
-            }
-        });
+                } else {
+                    System.out.println("Неизвестная команда: " + message);
+                }
+                break;
+        }
     }
 
     private void uploadFileInChunks(File file, String recipientName) {
@@ -976,215 +837,177 @@ public class ChatClient extends Application {
 
     private void connectToServer() {
         try {
-            Socket socket = new Socket(SERVER_CHAT_ADDRESS, SERVER_CHAT_PORT);
+            socket = new Socket(SERVER_CHAT_ADDRESS, SERVER_CHAT_PORT);
             out = new PrintWriter(socket.getOutputStream(), true);
             in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            startServerListener();
+            
+            // Инициализируем VoiceCallManager после подключения
+            voiceCallManager = new VoiceCallManager(out);
+            screenShareManager = new ScreenShareManager(out);
+            
+            // Запускаем поток для чтения сообщений от сервера
+            Thread serverThread = new Thread(this::readServerMessages);
+            serverThread.setDaemon(true);
+            serverThread.start();
+            
+        } catch (IOException e) {
+            showAlert(Alert.AlertType.ERROR, "Ошибка подключения", "Не удалось подключиться к серверу: " + e.getMessage());
+        }
+    }
+
+    private void readServerMessages() {
+        try {
+            String fromServer;
+            while ((fromServer = in.readLine()) != null) {
+                handleServerMessage(fromServer);
+            }
         } catch (IOException e) {
             Platform.runLater(() -> {
-                if (feedbackLabel != null) {
-                    feedbackLabel.setText("Ошибка: не удалось подключиться к серверу.");
-                } else {
-                    showAlert(Alert.AlertType.ERROR, "Ошибка подключения", "Не удалось подключиться к серверу.");
+                if (primaryStage.getScene() != null && primaryStage.getScene().getRoot().getChildrenUnmodifiable().size() > 1) {
+                    addSystemMessage("!!! ПОТЕРЯНО СОЕДИНЕНИЕ С СЕРВЕРОМ !!!", null);
+                    showAlert(Alert.AlertType.ERROR, "Связь потеряна", "Потеряно соединение с сервером. Пожалуйста, перезапустите приложение.");
                 }
-                e.printStackTrace();
             });
         }
     }
 
-    private void startServerListener() {
-        new Thread(() -> {
-            try {
-                String fromServer;
-                while ((fromServer = in.readLine()) != null) {
-                    handleServerMessage(fromServer);
-                }
-            } catch (IOException e) {
-                Platform.runLater(() -> {
-                    if (primaryStage.getScene() != null && primaryStage.getScene().getRoot().getChildrenUnmodifiable().size() > 1) {
-                        addSystemMessage("!!! ПОТЕРЯНО СОЕДИНЕНИЕ С СЕРВЕРОМ !!!", null);
-                        showAlert(Alert.AlertType.ERROR, "Связь потеряна", "Потеряно соединение с сервером. Пожалуйста, перезапустите приложение.");
-                    }
-                });
-            }
-        }).start();
-    }
 
-    private void addSystemMessage(String text, String partner) {
+
+    private void showAlert(Alert.AlertType alertType, String title, String content) {
         Platform.runLater(() -> {
-            String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"));
-            allMessages.add(new ChatMessage(text, "Система", timestamp, false, partner));
-            
-            // Автоматическая прокрутка к последнему сообщению
-            if (messageListView != null) {
-                messageListView.scrollTo(allMessages.size() - 1);
-            }
+            Alert alert = new Alert(alertType);
+            alert.setTitle(title);
+            alert.setHeaderText(null);
+            alert.setContentText(content);
+            alert.show();
         });
     }
 
-    private void showAlert(Alert.AlertType type, String title, String content) {
-        Alert alert = new Alert(type);
-        alert.setTitle(title);
-        alert.setHeaderText(null);
-        alert.setContentText(content);
-        alert.show();
-    }
-
     private class MessageCell extends ListCell<ChatMessage> {
-        private final Map<String, Image> iconCache = new HashMap<>();
-        public MessageCell() {
-            // Создаем простые текстовые иконки вместо загрузки файлов
-            try {
-                // Попробуем загрузить иконки, но если не получится - создадим текстовые
-                iconCache.put("file", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/file_icon.png")));
-                iconCache.put("archive", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/archive_icon.png")));
-                iconCache.put("doc", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/doc_icon.png")));
-                iconCache.put("image", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/image_icon.png")));
-                iconCache.put("video", new Image(getClass().getResourceAsStream("/anti/messanger/sxdpandoram/icons/video_icon.png")));
-            } catch (Exception e) {
-                System.out.println("Иконки не загружены, используются текстовые символы");
-                // Создаем пустые изображения для предотвращения ошибок
-                iconCache.put("file", null);
-                iconCache.put("archive", null);
-                iconCache.put("doc", null);
-                iconCache.put("image", null);
-                iconCache.put("video", null);
-            }
-        }
         @Override
         protected void updateItem(ChatMessage message, boolean empty) {
             super.updateItem(message, empty);
+            
             if (empty || message == null) {
                 setGraphic(null);
+                setText(null);
+                return;
+            }
+            
+            VBox messageBox = new VBox(5);
+            messageBox.setPadding(new Insets(5));
+            
+            // Заголовок сообщения
+            HBox headerBox = new HBox(10);
+            headerBox.setAlignment(Pos.CENTER_LEFT);
+            
+            Label senderLabel = new Label(message.getSender());
+            senderLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: " + currentTheme.getAccent() + ";");
+            
+            Label timeLabel = new Label(message.getTimestamp());
+            timeLabel.setStyle("-fx-text-fill: " + currentTheme.getMuted() + "; -fx-font-size: 10;");
+            
+            headerBox.getChildren().addAll(senderLabel, timeLabel);
+            
+            // Содержимое сообщения
+            VBox contentBox = new VBox(5);
+            
+            // Проверяем, является ли это системным сообщением
+            if (message.isSystemMessage()) {
+                messageBox.setStyle("-fx-background-color: " + currentTheme.getTertiary() + "; -fx-border-color: " + currentTheme.getAccent() + "; -fx-border-radius: 8; -fx-background-radius: 8; -fx-padding: 10; -fx-alignment: center;");
+                
+                Label systemLabel = new Label(message.getContent());
+                systemLabel.setStyle("-fx-text-fill: " + currentTheme.getText() + "; -fx-font-style: italic; -fx-font-weight: bold;");
+                systemLabel.setWrapText(true);
+                contentBox.getChildren().add(systemLabel);
             } else {
-                setGraphic(message.isFileOffer() ? createFileOfferBubble(message) : createSimpleMessageBubble(message));
-            }
-        }
-        private Node createSimpleMessageBubble(ChatMessage message) {
-            VBox bubble = new VBox(3);
-            bubble.setMaxWidth(400);
-            
-            if (!message.getSender().equals("Система") && !message.isSentByMe()) {
-                Label senderLabel = new Label(message.getSender());
-                senderLabel.setFont(Font.font("System", FontWeight.BOLD, 13));
-                senderLabel.setTextFill(Color.CORNFLOWERBLUE);
-                bubble.getChildren().add(senderLabel);
-            }
-            
-            Label contentLabel = new Label(message.getContent());
-            contentLabel.setWrapText(true);
-            contentLabel.setStyle("-fx-text-fill: " + currentTheme.getText() + ";");
-            bubble.getChildren().add(contentLabel);
-            
-            if (message.getTimestamp() != null && !message.getTimestamp().isEmpty()) {
-                Label timeLabel = new Label(message.getTimestamp());
-                timeLabel.setFont(Font.font(10));
-                timeLabel.setTextFill(Color.GRAY);
-                HBox timeContainer = new HBox(timeLabel);
-                timeContainer.setAlignment(Pos.CENTER_RIGHT);
-                bubble.getChildren().add(timeContainer);
-            }
-            
-            HBox wrapper = new HBox();
-            String bubbleStyle = "-fx-background-radius: 15; -fx-padding: 8; -fx-border-radius: 15; -fx-border-width: 1;";
-            
-            if (message.isSentByMe()) {
-                bubble.setStyle(bubbleStyle + 
-                    "-fx-background-color: " + currentTheme.getAccent() + ";" +
-                    "-fx-border-color: " + currentTheme.getAccent() + ";");
-                wrapper.setAlignment(Pos.CENTER_RIGHT);
-            } else {
-                bubble.setStyle(bubbleStyle + 
-                    "-fx-background-color: " + currentTheme.getSecondary() + ";" +
-                    "-fx-border-color: " + currentTheme.getTertiary() + ";");
-                wrapper.setAlignment(Pos.CENTER_LEFT);
-            }
-            
-            if (message.getSender().equals("Система")) {
-                bubble.setStyle("-fx-background-color: transparent;");
-                contentLabel.setStyle("-fx-text-fill: " + currentTheme.getMuted() + "; -fx-font-style: italic;");
-                wrapper.setAlignment(Pos.CENTER);
-            }
-            
-            wrapper.getChildren().add(bubble);
-            wrapper.setPadding(new Insets(5, 10, 5, 10));
-            return wrapper;
-        }
-        private Node createFileOfferBubble(ChatMessage message) {
-            ImageView preview = new ImageView();
-            String previewData = message.getFilePreviewData();
-            if (previewData != null && previewData.startsWith("img:")) {
-                try {
-                    byte[] imageBytes = Base64.getDecoder().decode(previewData.substring(4));
-                    preview.setImage(new Image(new ByteArrayInputStream(imageBytes)));
-                } catch(Exception e) { 
-                    Image icon = iconCache.get("image");
-                    if (icon != null) {
-                        preview.setImage(icon);
-            } else {
-                        // Создаем текстовую иконку если изображение не загружено
-                        preview.setImage(null);
-                        preview.setStyle("-fx-background-color: #ddd; -fx-alignment: center;");
+                // Обычное сообщение
+                boolean isOwnMessage = message.getSender().equals(currentUsername);
+                String backgroundColor = isOwnMessage ? currentTheme.getAccent() : currentTheme.getSecondary();
+                String textColor = isOwnMessage ? "white" : currentTheme.getText();
+                
+                messageBox.setStyle("-fx-background-color: " + backgroundColor + "; -fx-border-color: " + currentTheme.getTertiary() + "; -fx-border-radius: 8; -fx-background-radius: 8; -fx-padding: 10; -fx-max-width: 400;");
+                
+                // Обрабатываем содержимое сообщения
+                String content = message.getContent();
+                
+                // Заменяем эмодзи
+                content = replaceTextEmojis(content);
+                
+                // Проверяем на спойлеры
+                if (content.contains("||") && content.indexOf("||") != content.lastIndexOf("||")) {
+                    String[] spoilerParts = content.split("\\|\\|");
+                    for (int i = 0; i < spoilerParts.length; i++) {
+                        if (i % 2 == 0) {
+                            // Обычный текст
+                            if (!spoilerParts[i].isEmpty()) {
+                                Label textLabel = new Label(spoilerParts[i]);
+                                textLabel.setStyle("-fx-text-fill: " + textColor + ";");
+                                textLabel.setWrapText(true);
+                                contentBox.getChildren().add(textLabel);
+                            }
+                        } else {
+                            // Спойлер
+                            VBox spoilerBox = createSpoilerElement(spoilerParts[i]);
+                            contentBox.getChildren().add(spoilerBox);
+                        }
                     }
-                }
-            } else {
-                Image icon = iconCache.getOrDefault(previewData != null ? previewData.substring(5) : "file", iconCache.get("file"));
-                if (icon != null) {
-                    preview.setImage(icon);
                 } else {
-                    // Создаем текстовую иконку если изображение не загружено
-                    preview.setImage(null);
-                    preview.setStyle("-fx-background-color: #ddd; -fx-alignment: center;");
+                    // Обычный текст
+                    Label contentLabel = new Label(content);
+                    contentLabel.setStyle("-fx-text-fill: " + textColor + ";");
+                    contentLabel.setWrapText(true);
+                    contentBox.getChildren().add(contentLabel);
+                }
+                
+                // Проверяем на файлы
+                if (message.isFileMessage()) {
+                    VBox fileBox = new VBox(5);
+                    fileBox.setStyle("-fx-background-color: " + currentTheme.getTertiary() + "; -fx-border-color: " + currentTheme.getTertiary() + "; -fx-border-radius: 4; -fx-background-radius: 4; -fx-padding: 10; -fx-max-width: 300;");
+                    
+                    Label fileNameLabel = new Label(message.getFileName());
+                    fileNameLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: " + currentTheme.getText() + ";");
+                    
+                    Label fileSizeLabel = new Label(formatFileSize(message.getFileSize()));
+                    fileSizeLabel.setStyle("-fx-font-size: 10; -fx-text-fill: " + currentTheme.getMuted() + ";");
+                    
+                    Button downloadButton = new Button("Скачать");
+                    downloadButton.setStyle("-fx-background-color: " + currentTheme.getAccent() + "; -fx-text-fill: white; -fx-background-radius: 4; -fx-border-radius: 4; -fx-padding: 5 10;");
+                    downloadButton.setOnAction(e -> {
+                        File file = offeredFiles.get(message.getSender() + "::" + message.getFileName());
+                        if (file != null && file.exists()) {
+                            FileChooser fileChooser = new FileChooser();
+                            fileChooser.setTitle("Сохранить файл");
+                            fileChooser.setInitialFileName(message.getFileName());
+                            File saveFile = fileChooser.showSaveDialog(primaryStage);
+                            if (saveFile != null) {
+                                try {
+                                    java.nio.file.Files.copy(file.toPath(), saveFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                                    showAlert(Alert.AlertType.INFORMATION, "Файл сохранен", "Файл успешно сохранен: " + saveFile.getName());
+                                } catch (IOException ex) {
+                                    showAlert(Alert.AlertType.ERROR, "Ошибка", "Не удалось сохранить файл: " + ex.getMessage());
+                                }
+                            }
+                        } else {
+                            showAlert(Alert.AlertType.ERROR, "Ошибка", "Файл не найден");
+                        }
+                    });
+                    
+                    fileBox.getChildren().addAll(fileNameLabel, fileSizeLabel, downloadButton);
+                    contentBox.getChildren().add(fileBox);
                 }
             }
-            preview.setFitHeight(80);
-            preview.setFitWidth(80);
-            preview.setPreserveRatio(true);
-            MediaType mediaType = getMediaType(message.getFileName());
-            if (message.getDownloadUrl() != null && mediaType != MediaType.OTHER) {
-                preview.setStyle("-fx-cursor: hand;");
-                preview.setOnMouseClicked(e -> {
-                    if (mediaType == MediaType.IMAGE) showImagePreview(message);
-                    else if (mediaType == MediaType.VIDEO) showVideoPreview(message);
-                });
-            }
-            Label fileNameLabel = new Label(message.getFileName());
-            fileNameLabel.setFont(Font.font("System", FontWeight.BOLD, 14));
-            Label fileSizeLabel = new Label(String.format("%.2f KB", message.getFileSize() / 1024.0));
-            VBox fileInfoBox = new VBox(5, fileNameLabel, fileSizeLabel);
-            HBox fileBox = new HBox(10, preview, fileInfoBox);
-            fileBox.setAlignment(Pos.CENTER_LEFT);
-            HBox actionPane = new HBox(10);
-            actionPane.setAlignment(Pos.CENTER_LEFT);
-            if (message.getDownloadUrl() != null) {
-                Hyperlink downloadLink = new Hyperlink("Скачать файл");
-                downloadLink.setOnAction(e -> getHostServices().showDocument(message.getDownloadUrl()));
-                actionPane.getChildren().add(downloadLink);
-            } else {
-                if (message.isSentByMe()) {
-                    actionPane.getChildren().add(new Label("Предложение отправлено"));
-                } else {
-                    Button acceptBtn = new Button("Принять");
-                    Button declineBtn = new Button("Отклонить");
-                    actionPane.getChildren().addAll(acceptBtn, declineBtn);
-                    acceptBtn.setOnAction(e -> {
-                        out.println("FILE_ACCEPT§§" + message.getSender() + "§§" + message.getFileName());
-                        actionPane.getChildren().setAll(new Label("Ожидание загрузки..."));
-                    });
-                    declineBtn.setOnAction(e -> {
-                        out.println("FILE_DECLINE§§" + message.getSender() + "§§" + message.getFileName());
-                        actionPane.getChildren().setAll(new Label("Отклонено"));
-                    });
-                }
-            }
-            VBox bubbleContent = new VBox(10, fileBox, actionPane);
-            VBox bubble = new VBox(bubbleContent);
-            bubble.setPadding(new Insets(10));
-            bubble.setStyle("-fx-background-radius: 15; -fx-border-color: #ccc; -fx-border-width: 1px; -fx-border-radius: 15; -fx-background-color: #f5f5f5;");
-            HBox wrapper = new HBox(bubble);
-            wrapper.setPadding(new Insets(5, 10, 5, 10));
-            wrapper.setAlignment(message.isSentByMe() ? Pos.CENTER_RIGHT : Pos.CENTER_LEFT);
-            return wrapper;
+            
+            messageBox.getChildren().addAll(headerBox, contentBox);
+            setGraphic(messageBox);
+            setText(null);
+        }
+        
+        private String formatFileSize(long bytes) {
+            if (bytes < 1024) return bytes + " B";
+            if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
+            if (bytes < 1024 * 1024 * 1024) return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
+            return String.format("%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0));
         }
     }
     
@@ -1193,8 +1016,8 @@ public class ChatClient extends Application {
     private void showThemeSelector() {
         Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
         alert.setTitle("Выбор темы");
-        alert.setHeaderText("Выберите тему оформления:");
-        alert.setContentText("Текущая тема: " + currentTheme.name());
+        alert.setHeaderText("Выберите тему интерфейса:");
+        alert.setContentText("Какую тему вы хотите использовать?");
         
         ButtonType discordDark = new ButtonType("Discord Dark");
         ButtonType discordLight = new ButtonType("Discord Light");
@@ -1213,7 +1036,9 @@ public class ChatClient extends Application {
             else if (result.get() == greenDark) selectedTheme = Theme.GREEN_DARK;
             
             if (selectedTheme != null) {
+                currentTheme = selectedTheme;
                 applyTheme(selectedTheme);
+                saveSessionSettings();
             }
         }
     }
@@ -1244,43 +1069,83 @@ public class ChatClient extends Application {
         saveSessionSettings();
     }
     
-    private void updateWindowStyles(Theme theme) {
-        // Обновляем стили окна звонка
-        if (callStage != null && callStage.getScene() != null) {
-            Node root = callStage.getScene().getRoot();
-            if (root instanceof VBox) {
-                VBox vbox = (VBox) root;
-                vbox.setStyle("-fx-background-color: " + theme.getPrimary() + "; -fx-text-fill: " + theme.getText() + ";");
+    private void applyThemeToSettingsWindow(Theme theme) {
+        Platform.runLater(() -> {
+            // Применяем тему к окну настроек
+            if (primaryStage != null && primaryStage.getScene() != null) {
+                // Обновляем основной цвет фона
+                primaryStage.getScene().getRoot().setStyle(
+                    "-fx-background-color: " + theme.getPrimary() + ";"
+                );
                 
-                // Обновляем стили всех элементов в окне звонка
-                for (Node child : vbox.getChildren()) {
-                    if (child instanceof Label) {
-                        Label label = (Label) child;
-                        if (label.getText().contains("Звоним") || label.getText().contains("Входящий") || label.getText().contains("Разговор")) {
-                            label.setStyle("-fx-text-fill: " + theme.getText() + "; -fx-font-size: 16;");
-                        } else {
-                            label.setStyle("-fx-text-fill: " + theme.getText() + "; -fx-font-size: 24; -fx-font-weight: bold;");
+                // Обновляем стили для всех элементов в окне настроек
+                updateTextFieldStyles(primaryStage.getScene().getRoot(), theme);
+                updateButtonStylesRecursive(primaryStage.getScene().getRoot(), theme);
+                
+                // Обновляем стили для ComboBox
+                if (primaryStage.getScene().getRoot() instanceof VBox) {
+                    VBox root = (VBox) primaryStage.getScene().getRoot();
+                    for (javafx.scene.Node child : root.getChildren()) {
+                        if (child instanceof ComboBox) {
+                            ComboBox<?> comboBox = (ComboBox<?>) child;
+                            comboBox.setStyle("-fx-background-color: " + theme.getSecondary() + "; -fx-text-fill: " + theme.getText() + "; -fx-border-color: " + theme.getTertiary() + "; -fx-border-radius: 5; -fx-background-radius: 5;");
                         }
-                    } else if (child instanceof HBox) {
-                        updateButtonStylesInContainer(child, theme);
+                    }
+                }
+            }
+        });
+    }
+    
+    private void updateWindowStyles(Theme theme) {
+        // Обновляем стили для всех открытых окон звонков
+        for (Stage callWindow : activeCallWindows.values()) {
+            if (callWindow.getScene() != null && callWindow.getScene().getRoot() != null) {
+                javafx.scene.Node root = callWindow.getScene().getRoot();
+                if (root instanceof VBox) {
+                    VBox vbox = (VBox) root;
+                    vbox.setStyle("-fx-background-color: " + theme.getAccent() + "; -fx-text-fill: " + theme.getTertiary() + ";");
+                    
+                    // Обновляем стили всех элементов в окне звонка
+                    for (javafx.scene.Node child : vbox.getChildren()) {
+                        if (child instanceof Label) {
+                            Label label = (Label) child;
+                            if (label.getText().contains("Звоним") || label.getText().contains("Входящий") || label.getText().contains("Разговор")) {
+                                label.setStyle("-fx-text-fill: " + theme.getTertiary() + "; -fx-font-size: 16;");
+                            } else {
+                                label.setStyle("-fx-text-fill: " + theme.getTertiary() + "; -fx-font-size: 24; -fx-font-weight: bold;");
+                            }
+                        } else if (child instanceof HBox) {
+                            HBox hbox = (HBox) child;
+                            for (javafx.scene.Node button : hbox.getChildren()) {
+                                if (button instanceof Button) {
+                                    button.setStyle(String.format(
+                                        "-fx-background-color: %s; -fx-text-fill: %s; -fx-border-color: %s; -fx-border-radius: 5; -fx-background-radius: 5;",
+                                        theme.getAccent(), theme.getTertiary(), theme.getSecondary()
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
         
-        // Обновляем стили окна демонстрации экрана
-        if (screenShareStage != null && screenShareStage.getScene() != null) {
-            Node root = screenShareStage.getScene().getRoot();
+        // Обновляем стили для окна демонстрации экрана
+        if (screenShareStage != null && screenShareStage.getScene() != null && screenShareStage.getScene().getRoot() != null) {
+            javafx.scene.Node root = screenShareStage.getScene().getRoot();
             if (root instanceof VBox) {
                 VBox vbox = (VBox) root;
-                vbox.setStyle("-fx-background-color: " + theme.getPrimary() + ";");
+                vbox.setStyle("-fx-background-color: " + theme.getAccent() + ";");
                 
-                for (Node child : vbox.getChildren()) {
+                for (javafx.scene.Node child : vbox.getChildren()) {
                     if (child instanceof Label) {
-                        child.setStyle("-fx-text-fill: " + theme.getText() + "; -fx-font-size: 14;");
+                        child.setStyle("-fx-text-fill: " + theme.getTertiary() + "; -fx-font-size: 14;");
                     } else if (child instanceof Button) {
                         Button button = (Button) child;
-                        button.setStyle("-fx-background-color: #ff4444; -fx-text-fill: white;");
+                        button.setStyle(String.format(
+                            "-fx-background-color: %s; -fx-text-fill: %s; -fx-border-color: %s; -fx-border-radius: 5; -fx-background-radius: 5;",
+                            theme.getSecondary(), theme.getTertiary(), theme.getAccent()
+                        ));
                     }
                 }
             }
@@ -1305,7 +1170,7 @@ public class ChatClient extends Application {
         }
     }
     
-    private void updateTextFieldStyles(Node node, Theme theme) {
+    private void updateTextFieldStyles(javafx.scene.Node node, Theme theme) {
         if (node instanceof TextField) {
             TextField textField = (TextField) node;
             textField.setStyle(String.format(
@@ -1313,7 +1178,8 @@ public class ChatClient extends Application {
                 theme.getSecondary(), theme.getText(), theme.getTertiary()
             ));
         } else if (node instanceof javafx.scene.Parent) {
-            for (Node child : ((javafx.scene.Parent) node).getChildrenUnmodifiable()) {
+            javafx.scene.Parent parent = (javafx.scene.Parent) node;
+            for (javafx.scene.Node child : parent.getChildrenUnmodifiable()) {
                 updateTextFieldStyles(child, theme);
             }
         }
@@ -1321,112 +1187,85 @@ public class ChatClient extends Application {
     
     private void updateThemeStyles(Theme theme) {
         if (primaryStage != null && primaryStage.getScene() != null) {
-            Node root = primaryStage.getScene().getRoot();
+            javafx.scene.Node root = primaryStage.getScene().getRoot();
+            
+            // Применяем стили ко всем панелям
+            String primaryStyle = "-fx-background-color: " + theme.getPrimary() + ";";
+            String secondaryStyle = "-fx-background-color: " + theme.getSecondary() + ";";
+            String textStyle = "-fx-text-fill: " + theme.getText() + ";";
+            
+            // Основная панель
             if (root instanceof BorderPane) {
                 BorderPane borderPane = (BorderPane) root;
-                
-                // Применяем стили ко всем панелям
-                String primaryStyle = "-fx-background-color: " + theme.getPrimary() + ";";
-                String secondaryStyle = "-fx-background-color: " + theme.getSecondary() + ";";
-                String textStyle = "-fx-text-fill: " + theme.getText() + ";";
-                
-                // Основная панель
                 borderPane.setStyle(primaryStyle);
                 
                 // Левая панель
-                if (borderPane.getLeft() != null) {
-                    borderPane.getLeft().setStyle(secondaryStyle + textStyle);
+                if (borderPane.getLeft() instanceof VBox) {
+                    VBox leftPanel = (VBox) borderPane.getLeft();
+                    leftPanel.setStyle(secondaryStyle);
                 }
                 
-                // Центральная панель - НЕ применяем стиль, чтобы не перекрывать сообщения
-                if (borderPane.getCenter() != null) {
-                    // Убираем стиль с центральной панели
-                    borderPane.getCenter().setStyle("");
-                }
-                
-                // Верхняя панель
-                if (borderPane.getTop() != null) {
-                    borderPane.getTop().setStyle(secondaryStyle + textStyle);
-                }
-                
-                // Нижняя панель
-                if (borderPane.getBottom() != null) {
-                    borderPane.getBottom().setStyle(secondaryStyle + textStyle);
+                // Центральная панель
+                if (borderPane.getCenter() instanceof BorderPane) {
+                    BorderPane centerPanel = (BorderPane) borderPane.getCenter();
+                    centerPanel.setStyle(primaryStyle);
                 }
             }
-        }
-        
-        // Стили для списка сообщений - прозрачный фон
-        if (messageListView != null) {
-            messageListView.setStyle(
-                "-fx-background-color: transparent;" +
-                "-fx-text-fill: " + theme.getText() + ";"
-            );
-        }
-        
-        // Стили для списка пользователей
-        if (userListView != null) {
-            userListView.setStyle(
-                "-fx-background-color: " + theme.getSecondary() + ";" +
-                "-fx-text-fill: " + theme.getText() + ";"
-            );
+            
+            // Обновляем стили для списков сообщений
+            if (messageListView != null) {
+                messageListView.setStyle(
+                    "-fx-background-color: transparent;" +
+                    "-fx-text-fill: " + theme.getText() + ";"
+                );
+            }
+            
+            // Обновляем стили для списка пользователей
+            if (userListView != null) {
+                userListView.setStyle(
+                    "-fx-background-color: " + theme.getSecondary() + ";" +
+                    "-fx-text-fill: " + theme.getText() + ";"
+                );
+            }
         }
     }
     
     private void updateButtonStyles(Theme theme) {
-        // Обновление стилей кнопок
-        String buttonStyle = String.format(
-            "-fx-background-color: %s; -fx-text-fill: %s; -fx-border-color: %s; -fx-border-radius: 5; -fx-background-radius: 5;",
-            theme.getAccent(), theme.getText(), theme.getTertiary()
-        );
-        
-        // Применяем стили к кнопкам в верхней панели
         if (primaryStage != null && primaryStage.getScene() != null) {
-            Node root = primaryStage.getScene().getRoot();
-            if (root instanceof BorderPane) {
-                BorderPane borderPane = (BorderPane) root;
-                if (borderPane.getTop() != null) {
-                    applyButtonStyles(borderPane.getTop(), theme);
-                }
-                if (borderPane.getLeft() != null) {
-                    applyButtonStyles(borderPane.getLeft(), theme);
-                }
-            }
+            updateButtonStylesRecursive(primaryStage.getScene().getRoot(), theme);
         }
     }
     
-    private void applyButtonStyles(Node node, Theme theme) {
+    private void updateButtonStylesRecursive(javafx.scene.Node node, Theme theme) {
         if (node instanceof Button) {
             Button button = (Button) node;
-            button.setStyle(String.format(
+            String buttonStyle = String.format(
                 "-fx-background-color: %s; -fx-text-fill: %s; -fx-border-color: %s; -fx-border-radius: 5; -fx-background-radius: 5;",
                 theme.getAccent(), theme.getText(), theme.getTertiary()
-            ));
+            );
+            button.setStyle(buttonStyle);
         } else if (node instanceof javafx.scene.Parent) {
-            for (Node child : ((javafx.scene.Parent) node).getChildrenUnmodifiable()) {
-                applyButtonStyles(child, theme);
+            javafx.scene.Parent parent = (javafx.scene.Parent) node;
+            for (javafx.scene.Node child : parent.getChildrenUnmodifiable()) {
+                updateButtonStylesRecursive(child, theme);
             }
         }
     }
     
-    private void showAddFriendDialog() {
+    public void showAddFriendDialog() {
         TextInputDialog dialog = new TextInputDialog();
         dialog.setTitle("Добавить друга");
         dialog.setHeaderText("Введите имя пользователя:");
-        dialog.setContentText("Имя:");
+        dialog.setContentText("Имя пользователя:");
         
         Optional<String> result = dialog.showAndWait();
         result.ifPresent(username -> {
             if (!username.isEmpty() && !username.equals(currentUsername)) {
-                if (userList.contains(username)) {
-                    showAlert(Alert.AlertType.WARNING, "Уже в друзьях", 
-                             "Пользователь " + username + " уже в вашем списке друзей.");
-                } else {
-                    out.println("ADD_FRIEND§§" + username);
-                }
+                out.println("ADD_FRIEND " + username);
+                showAlert(Alert.AlertType.INFORMATION, "Запрос отправлен", 
+                         "Запрос в друзья отправлен пользователю '" + username + "'!");
             } else if (username.equals(currentUsername)) {
-                showAlert(Alert.AlertType.WARNING, "Ошибка", 
-                         "Вы не можете добавить себя в друзья.");
+                showAlert(Alert.AlertType.WARNING, "Ошибка", "Нельзя добавить самого себя в друзья.");
             }
         });
     }
@@ -1434,106 +1273,51 @@ public class ChatClient extends Application {
     private void saveChatToFile() {
         FileChooser fileChooser = new FileChooser();
         fileChooser.setTitle("Сохранить чат");
-        fileChooser.setInitialFileName("chat_" + activeChat + "_" + 
-                                     LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm")) + ".txt");
         fileChooser.getExtensionFilters().add(
             new FileChooser.ExtensionFilter("Текстовые файлы", "*.txt")
         );
+        fileChooser.setInitialFileName("chat_" + activeChat + "_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm")) + ".txt");
         
         File file = fileChooser.showSaveDialog(primaryStage);
         if (file != null) {
-            try (PrintWriter writer = new PrintWriter(file, "UTF-8")) {
-                writer.println("Чат: " + activeChat);
-                writer.println("Экспорт: " + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+            try (PrintWriter writer = new PrintWriter(new FileWriter(file))) {
+                writer.println("Чат с " + activeChat);
+                writer.println("Дата: " + LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss")));
                 writer.println("==================================================");
-                writer.println();
                 
-                // Фильтруем сообщения для текущего чата и сортируем по времени
-                allMessages.stream()
-                    .filter(msg -> {
-                        if (activeChat.equals("Общий чат")) {
-                            return msg.getConversationPartner() == null;
-                        } else {
-                            return activeChat.equals(msg.getConversationPartner());
-                        }
-                    })
-                    .sorted((a, b) -> a.getTimestamp().compareTo(b.getTimestamp()))
-                    .forEach(msg -> {
-                        String time = msg.getTimestamp() != null ? msg.getTimestamp() : "";
-                        writer.println("[" + time + "] " + msg.getSender() + ": " + msg.getContent());
-                    });
+                for (ChatMessage message : allMessages) {
+                    if (message.getConversationPartner() != null && 
+                        (message.getConversationPartner().equals(activeChat) || 
+                         (activeChat.equals("Общий чат") && message.getConversationPartner() == null))) {
+                        writer.println("[" + message.getTimestamp() + "] " + message.getSender() + ": " + message.getContent());
+                    }
+                }
                 
-                writer.println();
-                writer.println("==================================================");
-                writer.println("Всего сообщений: " + allMessages.stream()
-                    .filter(msg -> {
-                        if (activeChat.equals("Общий чат")) {
-                            return msg.getConversationPartner() == null;
-                        } else {
-                            return activeChat.equals(msg.getConversationPartner());
-                        }
-                    }).count());
-                
-                showAlert(Alert.AlertType.INFORMATION, "Чат сохранен", 
-                         "Чат успешно сохранен в файл: " + file.getName());
+                showAlert(Alert.AlertType.INFORMATION, "Сохранено", "Чат успешно сохранен в файл: " + file.getName());
             } catch (IOException e) {
-                showAlert(Alert.AlertType.ERROR, "Ошибка", 
-                         "Не удалось сохранить чат: " + e.getMessage());
+                showAlert(Alert.AlertType.ERROR, "Ошибка", "Не удалось сохранить чат: " + e.getMessage());
             }
         }
     }
     
-    private void createScreenShareWindow() {
-        if (screenShareStage != null) {
-            screenShareStage.toFront();
-            return;
-        }
-        
-        screenShareStage = new Stage();
-        screenShareStage.setTitle("Демонстрация экрана");
-        
-        screenShareView = new ImageView();
-        screenShareView.setFitWidth(800);
-        screenShareView.setFitHeight(600);
-        screenShareView.setPreserveRatio(true);
-        screenShareView.setStyle("-fx-background-color: #000; -fx-border-color: #333; -fx-border-width: 2;");
-        
-        Label statusLabel = new Label("Ожидание демонстрации экрана...");
-        statusLabel.setStyle("-fx-text-fill: #fff; -fx-font-size: 14;");
-        
-        Button closeBtn = new Button("Закрыть");
-        closeBtn.setStyle("-fx-background-color: #ff4444; -fx-text-fill: white;");
-        closeBtn.setOnAction(e -> {
-            screenShareStage.close();
-            screenShareStage = null;
-            screenShareView = null;
-        });
-        
-        VBox root = new VBox(15);
-        root.setPadding(new Insets(20));
-        root.setAlignment(Pos.CENTER);
-        root.setStyle("-fx-background-color: #2f3136;");
-        root.getChildren().addAll(
-            statusLabel,
-            screenShareView,
-            closeBtn
-        );
-        
-        Scene scene = new Scene(root, 900, 750);
-        screenShareStage.setScene(scene);
-        
-        screenShareStage.setOnCloseRequest(e -> {
-            screenShareStage = null;
-            screenShareView = null;
-        });
-        
-        screenShareStage.show();
-    }
+    // Метод createScreenShareWindow удален - теперь используется интегрированная панель
     
     private void loadSessionSettings() {
-        try {
-            if (settingsFile.exists()) {
-                sessionSettings.load(new FileInputStream(settingsFile));
+        Properties sessionSettings = new Properties();
+        File sessionFile = new File("session_settings.properties");
+        
+        if (sessionFile.exists()) {
+            try (FileInputStream fis = new FileInputStream(sessionFile)) {
+                sessionSettings.load(fis);
+                
+                // Загружаем размер окна
+                String windowWidth = sessionSettings.getProperty("windowWidth", "900");
+                String windowHeight = sessionSettings.getProperty("windowHeight", "600");
+                
+                if (primaryStage != null) {
+                    primaryStage.setWidth(Double.parseDouble(windowWidth));
+                    primaryStage.setHeight(Double.parseDouble(windowHeight));
+                }
                 
                 // Загружаем тему
                 String themeName = sessionSettings.getProperty("currentTheme", "DISCORD_DARK");
@@ -1543,68 +1327,44 @@ public class ChatClient extends Application {
                     currentTheme = Theme.DISCORD_DARK;
                 }
                 
-                // Загружаем размеры окна
-                String widthStr = sessionSettings.getProperty("window_width", "900");
-                String heightStr = sessionSettings.getProperty("window_height", "600");
-                try {
-                    int width = Integer.parseInt(widthStr);
-                    int height = Integer.parseInt(heightStr);
-                    if (primaryStage != null) {
-                        primaryStage.setWidth(width);
-                        primaryStage.setHeight(height);
-                    }
-                } catch (NumberFormatException e) {
-                    // Игнорируем ошибки парсинга размеров
-                }
-                
-                // Загружаем данные входа
-                savedUsername = sessionSettings.getProperty("savedUsername", "");
-                savedPassword = sessionSettings.getProperty("savedPassword", "");
-                
-                // Загружаем профиль
+                // Загружаем данные профиля
                 displayName = sessionSettings.getProperty("displayName", "");
                 profileEmail = sessionSettings.getProperty("profileEmail", "");
                 avatarPath = sessionSettings.getProperty("avatarPath", "");
+                
+            } catch (IOException e) {
+                System.err.println("Ошибка загрузки настроек сессии: " + e.getMessage());
             }
-        } catch (IOException e) {
-            System.out.println("Не удалось загрузить настройки сессии: " + e.getMessage());
         }
     }
     
     private void saveSessionSettings() {
-        try {
-            sessionSettings.setProperty("currentTheme", currentTheme.name());
-            if (primaryStage != null) {
-                sessionSettings.setProperty("window_width", String.valueOf((int) primaryStage.getWidth()));
-                sessionSettings.setProperty("window_height", String.valueOf((int) primaryStage.getHeight()));
-            }
-            
-            // Сохраняем данные входа
-            sessionSettings.setProperty("savedUsername", savedUsername);
-            sessionSettings.setProperty("savedPassword", savedPassword);
-            
-            // Сохраняем профиль
-            sessionSettings.setProperty("displayName", displayName);
-            sessionSettings.setProperty("profileEmail", profileEmail);
-            sessionSettings.setProperty("avatarPath", avatarPath);
-            
-            sessionSettings.store(new FileOutputStream(settingsFile), "Session Settings");
-        } catch (IOException e) {
-            System.out.println("Не удалось сохранить настройки сессии: " + e.getMessage());
+        Properties sessionSettings = new Properties();
+        
+        // Сохраняем размер окна
+        if (primaryStage != null) {
+            sessionSettings.setProperty("windowWidth", String.valueOf(primaryStage.getWidth()));
+            sessionSettings.setProperty("windowHeight", String.valueOf(primaryStage.getHeight()));
         }
-    }
-    
-    private void sortMessagesByTime() {
-        allMessages.sort((a, b) -> {
-            if (a.getTimestamp() == null) return 1;
-            if (b.getTimestamp() == null) return -1;
-            return a.getTimestamp().compareTo(b.getTimestamp());
-        });
+        
+        // Сохраняем тему
+        sessionSettings.setProperty("currentTheme", currentTheme.name());
+        
+        // Сохраняем данные профиля
+        sessionSettings.setProperty("displayName", displayName);
+        sessionSettings.setProperty("profileEmail", profileEmail);
+        sessionSettings.setProperty("avatarPath", avatarPath);
+        
+        try (FileOutputStream fos = new FileOutputStream("session_settings.properties")) {
+            sessionSettings.store(fos, "Session Settings");
+        } catch (IOException e) {
+            System.err.println("Ошибка сохранения настроек сессии: " + e.getMessage());
+        }
     }
     
     // ===== МЕТОДЫ ДЛЯ РАБОТЫ С ГРУППАМИ И СЕРВЕРАМИ =====
     
-    private void showCreateGroupDialog() {
+    public void showCreateGroupDialog() {
         TextInputDialog dialog = new TextInputDialog();
         dialog.setTitle("Создать группу");
         dialog.setHeaderText("Введите название группы:");
@@ -1613,14 +1373,14 @@ public class ChatClient extends Application {
         Optional<String> result = dialog.showAndWait();
         result.ifPresent(groupName -> {
             if (!groupName.isEmpty()) {
-                out.println("CREATE_GROUP§§" + groupName);
+                out.println("CREATE_GROUP " + groupName);
                 showAlert(Alert.AlertType.INFORMATION, "Группа создана", 
                          "Группа '" + groupName + "' успешно создана!");
             }
         });
     }
     
-    private void showCreateServerDialog() {
+    public void showCreateServerDialog() {
         TextInputDialog dialog = new TextInputDialog();
         dialog.setTitle("Создать сервер");
         dialog.setHeaderText("Введите название сервера:");
@@ -1629,7 +1389,7 @@ public class ChatClient extends Application {
         Optional<String> result = dialog.showAndWait();
         result.ifPresent(serverName -> {
             if (!serverName.isEmpty()) {
-                out.println("CREATE_SERVER§§" + serverName);
+                out.println("CREATE_SERVER " + serverName);
                 showAlert(Alert.AlertType.INFORMATION, "Сервер создан", 
                          "Сервер '" + serverName + "' успешно создан!");
             }
@@ -1713,6 +1473,16 @@ public class ChatClient extends Application {
         themeComboBox.getItems().addAll(Theme.values());
         themeComboBox.setValue(currentTheme);
         themeComboBox.setStyle("-fx-background-color: " + currentTheme.getSecondary() + "; -fx-text-fill: " + currentTheme.getText() + "; -fx-border-color: " + currentTheme.getTertiary() + "; -fx-border-radius: 5; -fx-background-radius: 5;");
+        
+        // Применяем тему к ComboBox
+        themeComboBox.setOnAction(e -> {
+            Theme selectedTheme = themeComboBox.getValue();
+            if (selectedTheme != null) {
+                currentTheme = selectedTheme;
+                // Применяем тему к окну настроек
+                applyThemeToSettingsWindow(selectedTheme);
+            }
+        });
         themeComboBox.setConverter(new StringConverter<Theme>() {
             @Override
             public String toString(Theme theme) {
@@ -1757,8 +1527,13 @@ public class ChatClient extends Application {
             profileEmail = emailField.getText();
             currentTheme = themeComboBox.getValue();
             
-            // Сохраняем настройки
+            // Сохраняем настройки локально
             saveSessionSettings();
+            
+            // Сохраняем профиль в базу данных
+            if (out != null) {
+                out.println("UPDATE_PROFILE " + displayName + " " + profileEmail + " " + avatarPath);
+            }
             
             // Применяем тему
             applyTheme(currentTheme);
@@ -1793,5 +1568,441 @@ public class ChatClient extends Application {
         Scene scene = new Scene(root, 450, 650);
         settingsStage.setScene(scene);
         settingsStage.showAndWait();
+    }
+
+    private void addSystemMessage(String content, String conversationPartner) {
+        Platform.runLater(() -> {
+            if (allMessages != null) {
+                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"));
+                ChatMessage systemMessage = new ChatMessage(content, "Система", timestamp, false, conversationPartner);
+                allMessages.add(systemMessage);
+                sortMessagesByTime();
+                
+                // Автоматическая прокрутка к последнему сообщению
+                if (messageListView != null) {
+                    messageListView.scrollTo(allMessages.size() - 1);
+                }
+            }
+        });
+    }
+
+    private String replaceTextEmojis(String text) {
+        return text
+            .replace(":)", "😊")
+            .replace(":(", "😢")
+            .replace(":D", "😃")
+            .replace(":P", "😛")
+            .replace(";)", "😉")
+            .replace("<3", "❤️")
+            .replace(":heart:", "❤️")
+            .replace(":smile:", "😊")
+            .replace(":sad:", "😢")
+            .replace(":laugh:", "😃")
+            .replace(":wink:", "😉");
+    }
+    
+    private VBox createSpoilerContent(String content) {
+        return createSpoilerElement(content);
+    }
+    
+    private VBox createSpoilerElement(String content) {
+        VBox spoilerBox = new VBox(5);
+        spoilerBox.setStyle("-fx-background-color: #2f3136; -fx-border-color: #4f545c; -fx-border-radius: 5; -fx-background-radius: 5; -fx-padding: 10;");
+        
+        Label spoilerLabel = new Label("СПОЙЛЕР (нажмите, чтобы показать)");
+        spoilerLabel.setStyle("-fx-text-fill: #b9bbbe; -fx-font-weight: bold;");
+        
+        Label contentLabel = new Label(content);
+        contentLabel.setStyle("-fx-text-fill: white;");
+        contentLabel.setWrapText(true);
+        contentLabel.setVisible(false);
+        
+        spoilerBox.setOnMouseClicked(e -> {
+            contentLabel.setVisible(!contentLabel.isVisible());
+            spoilerLabel.setText(contentLabel.isVisible() ? "СПОЙЛЕР (нажмите, чтобы скрыть)" : "СПОЙЛЕР (нажмите, чтобы показать)");
+        });
+        
+        spoilerBox.getChildren().addAll(spoilerLabel, contentLabel);
+        return spoilerBox;
+    }
+
+    private VBox createContentWithLinks(String content) {
+        VBox contentBox = new VBox(5);
+        
+        // Простая проверка на ссылки
+        if (content.contains("http://") || content.contains("https://") || content.contains("www.")) {
+            String[] parts = content.split("\\s+");
+            for (String part : parts) {
+                if (part.startsWith("http://") || part.startsWith("https://") || part.startsWith("www.")) {
+                    Hyperlink link = new Hyperlink(part);
+                    link.setOnAction(e -> {
+                        try {
+                            Desktop.getDesktop().browse(new java.net.URI(part));
+                        } catch (Exception ex) {
+                            showAlert(Alert.AlertType.ERROR, "Ошибка", "Не удалось открыть ссылку: " + ex.getMessage());
+                        }
+                    });
+                    contentBox.getChildren().add(link);
+                } else {
+                    Label textLabel = new Label(part);
+                    textLabel.setStyle("-fx-text-fill: " + currentTheme.getText() + ";");
+                    contentBox.getChildren().add(textLabel);
+                }
+            }
+        } else {
+            Label textLabel = new Label(content);
+            textLabel.setStyle("-fx-text-fill: " + currentTheme.getText() + ";");
+            textLabel.setWrapText(true);
+            contentBox.getChildren().add(textLabel);
+        }
+        
+        return contentBox;
+    }
+    
+    private VBox createLinkPreview(String url) {
+        VBox previewBox = new VBox(5);
+        previewBox.setStyle("-fx-background-color: " + currentTheme.getSecondary() + "; -fx-border-color: " + currentTheme.getTertiary() + "; -fx-border-radius: 5; -fx-background-radius: 5; -fx-padding: 10;");
+        
+        Label urlLabel = new Label(url);
+        urlLabel.setStyle("-fx-text-fill: " + currentTheme.getAccent() + "; -fx-font-weight: bold;");
+        
+        Label previewLabel = new Label("Предпросмотр ссылки");
+        previewLabel.setStyle("-fx-text-fill: " + currentTheme.getText() + ";");
+        
+        previewBox.getChildren().addAll(urlLabel, previewLabel);
+        return previewBox;
+    }
+    
+    private void showImagePreview(String imagePath) {
+        try {
+            File imageFile = new File(imagePath);
+            if (imageFile.exists()) {
+                Image image = new Image(imageFile.toURI().toString());
+                
+                Stage previewStage = new Stage();
+                previewStage.setTitle("Предпросмотр изображения");
+                previewStage.initModality(javafx.stage.Modality.APPLICATION_MODAL);
+                
+                VBox root = new VBox(10);
+                root.setAlignment(Pos.CENTER);
+                root.setPadding(new Insets(20));
+                root.setStyle("-fx-background-color: " + currentTheme.getPrimary() + ";");
+                
+                Label titleLabel = new Label("Предпросмотр изображения");
+                titleLabel.setStyle("-fx-text-fill: " + currentTheme.getText() + "; -fx-font-size: 18; -fx-font-weight: bold;");
+                
+                ImageView imageView = new ImageView(image);
+                imageView.setFitWidth(400);
+                imageView.setFitHeight(300);
+                imageView.setPreserveRatio(true);
+                imageView.setStyle("-fx-border-color: " + currentTheme.getTertiary() + "; -fx-border-width: 2; -fx-border-radius: 5;");
+                
+                Button closeButton = new Button("Закрыть");
+                closeButton.setStyle("-fx-background-color: " + currentTheme.getAccent() + "; -fx-text-fill: " + currentTheme.getText() + "; -fx-font-size: 14; -fx-padding: 10 20; -fx-background-radius: 5;");
+                closeButton.setOnAction(e -> previewStage.close());
+                
+                root.getChildren().addAll(titleLabel, imageView, closeButton);
+                
+                Scene scene = new Scene(root, 450, 400);
+                previewStage.setScene(scene);
+                previewStage.show();
+            }
+        } catch (Exception e) {
+            showAlert(Alert.AlertType.ERROR, "Ошибка", "Не удалось загрузить изображение: " + e.getMessage());
+        }
+    }
+    
+    private void showVideoPreview(String videoPath) {
+        try {
+            File videoFile = new File(videoPath);
+            if (videoFile.exists()) {
+                // Для MP4 файлов показываем диалог с опциями
+                if (videoPath.toLowerCase().endsWith(".mp4")) {
+                    Alert alert = new Alert(Alert.AlertType.CONFIRMATION);
+                    alert.setTitle("Предпросмотр MP4");
+                    alert.setHeaderText("MP4 файл обнаружен");
+                    alert.setContentText("Хотите открыть файл во внешнем проигрывателе или скачать?");
+                    
+                    ButtonType openButton = new ButtonType("Открыть");
+                    ButtonType downloadButton = new ButtonType("Скачать");
+                    ButtonType cancelButton = new ButtonType("Отмена", ButtonBar.ButtonData.CANCEL_CLOSE);
+                    
+                    alert.getButtonTypes().setAll(openButton, downloadButton, cancelButton);
+                    
+                    Optional<ButtonType> result = alert.showAndWait();
+                    if (result.isPresent()) {
+                        if (result.get() == openButton) {
+                            Desktop.getDesktop().open(videoFile);
+                        } else if (result.get() == downloadButton) {
+                            // Копируем файл в папку загрузок
+                            String downloadsPath = System.getProperty("user.home") + "/Downloads/";
+                            File downloadsDir = new File(downloadsPath);
+                            if (!downloadsDir.exists()) {
+                                downloadsDir.mkdirs();
+                            }
+                            
+                            File destFile = new File(downloadsPath + videoFile.getName());
+                            java.nio.file.Files.copy(videoFile.toPath(), destFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                            
+                            showAlert(Alert.AlertType.INFORMATION, "Скачано", "Файл сохранен в папку Загрузки: " + destFile.getAbsolutePath());
+                        }
+                    }
+                } else {
+                    // Для других форматов пытаемся показать в MediaView
+                    Media media = new Media(videoFile.toURI().toString());
+                    MediaPlayer mediaPlayer = new MediaPlayer(media);
+                    MediaView mediaView = new MediaView(mediaPlayer);
+                    
+                    Stage previewStage = new Stage();
+                    previewStage.setTitle("Предпросмотр видео");
+                    previewStage.initModality(javafx.stage.Modality.APPLICATION_MODAL);
+                    
+                    VBox root = new VBox(10);
+                    root.setAlignment(Pos.CENTER);
+                    root.setPadding(new Insets(20));
+                    root.setStyle("-fx-background-color: " + currentTheme.getPrimary() + ";");
+                    
+                    Label titleLabel = new Label("Предпросмотр видео");
+                    titleLabel.setStyle("-fx-text-fill: " + currentTheme.getText() + "; -fx-font-size: 18; -fx-font-weight: bold;");
+                    
+                    mediaView.setFitWidth(400);
+                    mediaView.setFitHeight(300);
+                    mediaView.setStyle("-fx-border-color: " + currentTheme.getTertiary() + "; -fx-border-width: 2; -fx-border-radius: 5;");
+                    
+                    Button closeButton = new Button("Закрыть");
+                    closeButton.setStyle("-fx-background-color: " + currentTheme.getAccent() + "; -fx-text-fill: " + currentTheme.getText() + "; -fx-font-size: 14; -fx-padding: 10 20; -fx-background-radius: 5;");
+                    closeButton.setOnAction(e -> {
+                        mediaPlayer.stop();
+                        previewStage.close();
+                    });
+                    
+                    root.getChildren().addAll(titleLabel, mediaView, closeButton);
+                    
+                    Scene scene = new Scene(root, 450, 400);
+                    previewStage.setScene(scene);
+                    previewStage.show();
+                    
+                    mediaPlayer.play();
+                }
+            }
+        } catch (Exception e) {
+            showAlert(Alert.AlertType.ERROR, "Ошибка", "Не удалось загрузить видео: " + e.getMessage());
+        }
+    }
+
+    private void sendMessage() {
+        if (messageTextField != null) {
+            String text = messageTextField.getText().trim();
+            if (out != null && !text.isEmpty()) {
+                            if (activeChat.equals("Общий чат")) {
+                out.println("MSG " + text);
+            } else {
+                out.println("PM " + activeChat + " " + text);
+            }
+                messageTextField.clear();
+            }
+        }
+    }
+    
+    // Добавляем недостающие методы
+    private void initiateVideoCall() {
+        if (activeChat.equals("Общий чат")) {
+            showAlert(Alert.AlertType.WARNING, "Ошибка", "Видеозвонки возможны только в личных сообщениях.");
+            return;
+        }
+        showAlert(Alert.AlertType.INFORMATION, "Видеозвонки", "Видеозвонки пока не поддерживаются");
+    }
+    
+    private void initiateVoiceChat() {
+        if (activeChat.equals("Общий чат")) {
+            showAlert(Alert.AlertType.WARNING, "Ошибка", "Голосовые звонки возможны только в личных сообщениях.");
+            return;
+        }
+        
+        if (voiceCallManager != null) {
+            // Отправляем команду на сервер для инициации звонка
+            if (out != null) {
+                out.println("CALL_INVITE " + activeChat);
+                addSystemMessage("Отправлен запрос на голосовой звонок " + activeChat, activeChat);
+            }
+        } else {
+            showAlert(Alert.AlertType.ERROR, "Ошибка", "VoiceCallManager не инициализирован");
+        }
+    }
+    
+    private void stopVoiceChat() {
+        if (voiceCallManager != null) {
+            voiceCallManager.stopStreaming();
+            isInVoiceChat = false;
+            updateVoiceChatUI(false);
+            addSystemMessage("Голосовой звонок завершен с " + activeChat, activeChat);
+        }
+    }
+    
+    private void updateVoiceChatUI(boolean inCall) {
+        Platform.runLater(() -> {
+            if (voiceCallButton != null) {
+                voiceCallButton.setVisible(!inCall);
+            }
+            if (hangUpButton != null) {
+                hangUpButton.setVisible(inCall);
+            }
+            if (microphoneComboBox != null) {
+                microphoneComboBox.setVisible(inCall);
+            }
+            
+            // Обновляем общую видимость кнопок
+            updateCallButtonsVisibility();
+        });
+    }
+    
+    private void updateCallButtonsVisibility() {
+        Platform.runLater(() -> {
+            if (activeChat == null) return;
+            
+            boolean isPrivateChat = !activeChat.equals("Общий чат");
+            if (voiceCallButton != null) {
+                voiceCallButton.setVisible(isPrivateChat && !isInVoiceChat);
+            }
+            if (hangUpButton != null) {
+                hangUpButton.setVisible(isPrivateChat && isInVoiceChat);
+            }
+            if (microphoneComboBox != null) {
+                microphoneComboBox.setVisible(isPrivateChat && isInVoiceChat);
+            }
+        });
+    }
+    
+    private void showCallPanel(String peer) {
+        currentCallPeer = peer;
+        Platform.runLater(() -> {
+            if (integratedCallPanel != null) {
+                integratedCallPanel.setVisible(true);
+                if (messageListView != null) {
+                    messageListView.setVisible(false);
+                }
+            }
+        });
+    }
+    
+    private void showChat() {
+        Platform.runLater(() -> {
+            if (integratedCallPanel != null) {
+                integratedCallPanel.setVisible(false);
+            }
+            if (integratedScreenSharePanel != null) {
+                integratedScreenSharePanel.setVisible(false);
+            }
+            if (messageListView != null) {
+                messageListView.setVisible(true);
+            }
+        });
+    }
+    
+    private void toggleScreenSharing() {
+        if (screenShareManager != null) {
+            if (!isScreenSharing) {
+                screenShareManager.startSharing(activeChat);
+                isScreenSharing = true;
+                addSystemMessage("Демонстрация экрана начата", activeChat);
+            } else {
+                screenShareManager.stopSharing();
+                isScreenSharing = false;
+                addSystemMessage("Демонстрация экрана остановлена", activeChat);
+            }
+        }
+    }
+    
+    private void showIncomingScreenShare(Image image) {
+        if (screenShareStage == null) {
+            screenShareStage = new Stage();
+            screenShareStage.setTitle("Демонстрация экрана");
+            
+            VBox root = new VBox(10);
+            root.setAlignment(Pos.CENTER);
+            root.setPadding(new Insets(20));
+            root.setStyle("-fx-background-color: " + currentTheme.getPrimary() + ";");
+            
+            Label titleLabel = new Label("Демонстрация экрана");
+            titleLabel.setStyle("-fx-text-fill: " + currentTheme.getText() + "; -fx-font-size: 18; -fx-font-weight: bold;");
+            
+            screenShareView = new ImageView();
+            screenShareView.setFitWidth(800);
+            screenShareView.setFitHeight(600);
+            screenShareView.setPreserveRatio(true);
+            
+            Button closeButton = new Button("Закрыть");
+            closeButton.setStyle("-fx-background-color: " + currentTheme.getAccent() + "; -fx-text-fill: " + currentTheme.getText() + "; -fx-font-size: 14; -fx-padding: 10 20; -fx-background-radius: 5;");
+            closeButton.setOnAction(e -> screenShareStage.close());
+            
+            root.getChildren().addAll(titleLabel, screenShareView, closeButton);
+            
+            Scene scene = new Scene(root, 850, 700);
+            screenShareStage.setScene(scene);
+        }
+        
+        if (screenShareView != null) {
+            screenShareView.setImage(image);
+        }
+        if (screenShareStage != null && !screenShareStage.isShowing()) {
+            screenShareStage.show();
+        }
+    }
+    
+    private void createIntegratedCallPanel() {
+        integratedCallPanel = new BorderPane();
+        integratedCallPanel.setStyle("-fx-background-color: " + currentTheme.getPrimary() + ";");
+        integratedCallPanel.setVisible(false);
+        
+        VBox callContent = new VBox(20);
+        callContent.setAlignment(Pos.CENTER);
+        callContent.setPadding(new Insets(50));
+        
+        Label callLabel = new Label("Голосовой звонок");
+        callLabel.setStyle("-fx-text-fill: " + currentTheme.getText() + "; -fx-font-size: 24; -fx-font-weight: bold;");
+        
+        callPreviewImageView = new ImageView();
+        callPreviewImageView.setFitWidth(200);
+        callPreviewImageView.setFitHeight(150);
+        callPreviewImageView.setStyle("-fx-border-color: " + currentTheme.getTertiary() + "; -fx-border-width: 2; -fx-border-radius: 5;");
+        
+        peerPreviewImageView = new ImageView();
+        peerPreviewImageView.setFitWidth(200);
+        peerPreviewImageView.setFitHeight(150);
+        peerPreviewImageView.setStyle("-fx-border-color: " + currentTheme.getTertiary() + "; -fx-border-width: 2; -fx-border-radius: 5;");
+        
+        HBox previewBox = new HBox(20, callPreviewImageView, peerPreviewImageView);
+        previewBox.setAlignment(Pos.CENTER);
+        
+        Button endCallButton = new Button("Завершить звонок");
+        endCallButton.setStyle("-fx-background-color: #ed4245; -fx-text-fill: white; -fx-font-size: 16; -fx-padding: 10 20; -fx-background-radius: 5;");
+        endCallButton.setOnAction(e -> stopVoiceChat());
+        
+        callContent.getChildren().addAll(callLabel, previewBox, endCallButton);
+        if (integratedCallPanel != null) {
+            integratedCallPanel.setCenter(callContent);
+        }
+    }
+    
+    private void createIntegratedScreenSharePanel() {
+        integratedScreenSharePanel = new BorderPane();
+        integratedScreenSharePanel.setStyle("-fx-background-color: " + currentTheme.getPrimary() + ";");
+        integratedScreenSharePanel.setVisible(false);
+        
+        VBox screenContent = new VBox(20);
+        screenContent.setAlignment(Pos.CENTER);
+        screenContent.setPadding(new Insets(50));
+        
+        Label screenLabel = new Label("Демонстрация экрана");
+        screenLabel.setStyle("-fx-text-fill: " + currentTheme.getText() + "; -fx-font-size: 24; -fx-font-weight: bold;");
+        
+        Button stopScreenShareButton = new Button("Остановить демонстрацию");
+        stopScreenShareButton.setStyle("-fx-background-color: #ed4245; -fx-text-fill: white; -fx-font-size: 16; -fx-padding: 10 20; -fx-background-radius: 5;");
+        stopScreenShareButton.setOnAction(e -> toggleScreenSharing());
+        
+        screenContent.getChildren().addAll(screenLabel, stopScreenShareButton);
+        if (integratedScreenSharePanel != null) {
+            integratedScreenSharePanel.setCenter(screenContent);
+        }
     }
 }

@@ -61,6 +61,13 @@ public class ScreenShareManager {
         captureThread.setDaemon(true);
         captureThread.start();
     }
+    
+    // Метод для получения последнего кадра для предпросмотра
+    private volatile BufferedImage lastFrame = null;
+    
+    public BufferedImage getLastFrame() {
+        return lastFrame;
+    }
 
     public void stopSharing() {
         sharing.set(false);
@@ -87,6 +94,10 @@ public class ScreenShareManager {
                 try {
                     BufferedImage screenshot = robot.createScreenCapture(screenRect);
                     BufferedImage scaled = scaleToMax(screenshot, maxWidth, maxHeight);
+                    
+                    // Сохраняем кадр для предпросмотра
+                    lastFrame = scaled;
+                    
                     String b64 = toBase64Jpeg(scaled, quality);
                     
                     if (serverOut != null && peer != null && !b64.isEmpty()) {

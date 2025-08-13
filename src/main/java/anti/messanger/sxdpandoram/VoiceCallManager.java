@@ -175,6 +175,13 @@ public class VoiceCallManager {
             }
         } catch (IllegalArgumentException ignored) { }
     }
+    
+    // Алиас для handleIncomingVoiceFrame для совместимости
+    public void playAudioChunk(String base64Data) {
+        if (activePeer != null) {
+            handleIncomingVoiceFrame(activePeer, base64Data);
+        }
+    }
 
     private void openLines() {
         try {

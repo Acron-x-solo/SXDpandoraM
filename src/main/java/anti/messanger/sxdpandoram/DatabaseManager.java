@@ -209,29 +209,31 @@ public class DatabaseManager {
     // ===== Профили пользователей =====
 
     public UserProfile getUserProfile(String username) {
-        String sql = "SELECT username, COALESCE(display_name, ''), COALESCE(status, ''), avatar FROM users WHERE username = ?";
+        String sql = "SELECT username, COALESCE(display_name, ''), COALESCE(status, ''), COALESCE(email, ''), avatar FROM users WHERE username = ?";
         try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
             pstmt.setString(1, username);
             try (ResultSet rs = pstmt.executeQuery()) {
                 if (rs.next()) {
                     String displayName = rs.getString(2);
                     String status = rs.getString(3);
-                    byte[] avatar = rs.getBytes(4);
-                    return new UserProfile(username, displayName, status, avatar);
+                    String email = rs.getString(4);
+                    byte[] avatar = rs.getBytes(5);
+                    return new UserProfile(username, displayName, status, email, avatar);
                 }
             }
         } catch (SQLException e) {
             System.err.println("❌ Ошибка чтения профиля: " + e.getMessage());
         }
-        return new UserProfile(username, "", "", null);
+        return new UserProfile(username, "", "", "", null);
     }
 
-    public boolean updateUserProfile(String username, String displayName, String status) {
-        String sql = "UPDATE users SET display_name = ?, status = ? WHERE username = ?";
+    public boolean updateUserProfile(String username, String displayName, String status, String email) {
+        String sql = "UPDATE users SET display_name = ?, status = ?, email = ? WHERE username = ?";
         try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
             pstmt.setString(1, displayName);
             pstmt.setString(2, status);
-            pstmt.setString(3, username);
+            pstmt.setString(3, email);
+            pstmt.setString(4, username);
             return pstmt.executeUpdate() > 0;
         } catch (SQLException e) {
             System.err.println("❌ Ошибка обновления профиля: " + e.getMessage());

@@ -66,4 +66,12 @@ public class ChatMessage {
     public String getFileName() { return fileName; }
     public long getFileSize() { return fileSize; }
     public String getDownloadUrl() { return downloadUrl; }
+    
+    public boolean isSystemMessage() {
+        return sender != null && sender.equals("Система");
+    }
+    
+    public boolean isFileMessage() {
+        return isFileOffer && fileName != null;
+    }
 }

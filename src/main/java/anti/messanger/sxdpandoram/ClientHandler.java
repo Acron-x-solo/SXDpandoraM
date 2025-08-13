@@ -69,7 +69,7 @@ public class ClientHandler implements Runnable {
 
             String inputLine;
             while ((inputLine = in.readLine()) != null) {
-                String[] parts = inputLine.split("§§");
+                String[] parts = inputLine.split(" ", 3);
                 String command = parts[0];
                 switch (command) {
                     case "MSG":
@@ -82,7 +82,13 @@ public class ClientHandler implements Runnable {
                         sendUsersListToAll();
                         break;
                     case "FILE_OFFER":
-                        if (parts.length >= 5) handleFileOffer(parts[1], parts[2], Long.parseLong(parts[3]), parts[4]);
+                        if (parts.length >= 4) {
+                            String recipient = parts[1];
+                            String filename = parts[2];
+                            long filesize = Long.parseLong(parts[3]);
+                            String previewData = parts.length >= 5 ? parts[4] : "";
+                            handleFileOffer(recipient, filename, filesize, previewData);
+                        }
                         break;
                     case "FILE_ACCEPT":
                         if (parts.length >= 3) handleFileAccept(parts[1], parts[2]);
@@ -102,7 +108,7 @@ public class ClientHandler implements Runnable {
                         handleGetProfile();
                         break;
                     case "UPDATE_PROFILE":
-                        if (parts.length >= 3) handleUpdateProfile(parts[1], parts[2]);
+                        if (parts.length >= 4) handleUpdateProfile(parts[1], parts[2], parts[3]);
                         break;
                     case "UPDATE_AVATAR":
                         if (parts.length == 2) handleUpdateAvatar(parts[1]);
@@ -140,6 +146,15 @@ public class ClientHandler implements Runnable {
                         if (parts.length >= 3) handleServerMessage(Long.parseLong(parts[1]), parts[2]);
                         break;
                  // ==== Звонки и аудио ====
+                 case "CALL_INVITE":
+                     if (parts.length >= 2) handleVoiceInvite(parts[1]);
+                     break;
+                 case "CALL_ACCEPT":
+                     if (parts.length >= 2) handleVoiceAccept(parts[1]);
+                     break;
+                 case "CALL_DECLINE":
+                     if (parts.length >= 2) handleVoiceDecline(parts[1]);
+                     break;
                  case "VOICE_INVITE":
                      if (parts.length >= 2) handleVoiceInvite(parts[1]);
                      break;
@@ -194,11 +209,11 @@ public class ClientHandler implements Runnable {
     private void handleGetProfile() {
         UserProfile profile = databaseManager.getUserProfile(this.clientName);
         String avatarBase64 = profile.getAvatarBytes() != null ? Base64.getEncoder().encodeToString(profile.getAvatarBytes()) : "";
-        sendMessage(String.format("PROFILE_DATA§§%s§§%s§§%s", escape(profile.getDisplayName()), escape(profile.getStatus()), avatarBase64));
+        sendMessage(String.format("PROFILE_DATA§§%s§§%s§§%s§§%s", escape(profile.getDisplayName()), escape(profile.getStatus()), escape(profile.getEmail()), avatarBase64));
     }
 
-    private void handleUpdateProfile(String displayName, String status) {
-        boolean ok = databaseManager.updateUserProfile(this.clientName, unescape(displayName), unescape(status));
+    private void handleUpdateProfile(String displayName, String status, String email) {
+        boolean ok = databaseManager.updateUserProfile(this.clientName, unescape(displayName), unescape(status), unescape(email));
         sendMessage("PROFILE_UPDATED§§" + (ok ? "OK" : "ERROR"));
         if (ok) {
             // По желанию можно уведомлять всех о смене профиля
@@ -515,46 +530,46 @@ public class ClientHandler implements Runnable {
         return LocalDateTime.now().format(dtf);
     }
 
-    // ====== Voice Call helpers ======
-    private void handleVoiceInvite(String callee) {
-        ClientHandler r = findClientByName(callee);
-        if (r != null) {
-            r.sendMessage("VOICE_INVITE§§" + this.clientName);
-        } else {
-            sendMessage("SYS_MSG§§Пользователь недоступен для звонка");
-        }
-    }
+         // ====== Voice Call helpers ======
+     private void handleVoiceInvite(String callee) {
+         ClientHandler r = findClientByName(callee);
+         if (r != null) {
+             r.sendMessage("CALL_INVITE " + this.clientName);
+         } else {
+             sendMessage("SYS_MSG§§Пользователь недоступен для звонка");
+         }
+     }
 
-    private void handleVoiceAccept(String caller) {
-        ClientHandler c = findClientByName(caller);
-        if (c != null) {
-            // Подтверждаем обоим начало звонка
-            c.sendMessage("VOICE_START§§" + this.clientName);
-            sendMessage("VOICE_START§§" + caller);
-        }
-    }
+         private void handleVoiceAccept(String caller) {
+         ClientHandler c = findClientByName(caller);
+         if (c != null) {
+             // Подтверждаем обоим начало звонка
+             c.sendMessage("CALL_ACCEPTED " + this.clientName);
+             sendMessage("CALL_ACCEPTED " + caller);
+         }
+     }
 
-    private void handleVoiceDecline(String caller) {
-        ClientHandler c = findClientByName(caller);
-        if (c != null) {
-            c.sendMessage("VOICE_DECLINED§§" + this.clientName);
-        }
-    }
+         private void handleVoiceDecline(String caller) {
+         ClientHandler c = findClientByName(caller);
+         if (c != null) {
+             c.sendMessage("CALL_DECLINED " + this.clientName);
+         }
+     }
 
-    private void handleVoiceEnd(String peer) {
-        ClientHandler p = findClientByName(peer);
-        if (p != null) {
-            p.sendMessage("VOICE_END§§" + this.clientName);
-        }
-    }
+         private void handleVoiceEnd(String peer) {
+         ClientHandler p = findClientByName(peer);
+         if (p != null) {
+             p.sendMessage("VOICE_END " + this.clientName);
+         }
+     }
 
-    private void handleVoiceFrame(String recipient, String base64Data) {
-        ClientHandler r = findClientByName(recipient);
-        if (r != null) {
-            // Пересылаем кадр получателю с именем отправителя
-            r.sendMessage("AUDIO_CHUNK§§" + this.clientName + "§§" + base64Data);
-        }
-    }
+         private void handleVoiceFrame(String recipient, String base64Data) {
+         ClientHandler r = findClientByName(recipient);
+         if (r != null) {
+             // Пересылаем кадр получателю с именем отправителя
+             r.sendMessage("AUDIO_CHUNK " + this.clientName + " " + base64Data);
+         }
+     }
 
     private void handleScreenStart(String recipient) {
         ClientHandler r = findClientByName(recipient);
@@ -570,10 +585,10 @@ public class ClientHandler implements Runnable {
         }
     }
 
-    private void handleScreenFrame(String recipient, String base64Jpeg) {
-        ClientHandler r = findClientByName(recipient);
-        if (r != null) {
-            r.sendMessage("SCREEN_FRAME§§" + this.clientName + "§§" + base64Jpeg);
-        }
-    }
+         private void handleScreenFrame(String recipient, String base64Jpeg) {
+         ClientHandler r = findClientByName(recipient);
+         if (r != null) {
+             r.sendMessage("SCREEN_FRAME " + this.clientName + " " + base64Jpeg);
+         }
+     }
 }
